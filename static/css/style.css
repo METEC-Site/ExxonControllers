@@ -936,7 +936,7 @@ body {
   margin-bottom: 0.5rem;
 }
 .exp-device-row .schedule-step-table {
-  max-height: 180px;
+  max-height: 240px;
   overflow-y: auto;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -962,6 +962,51 @@ body {
   padding: 0.15rem 0.5rem;
   border-bottom: 1px solid #21262d;
   color: var(--text);
+}
+
+/* Inline-editable schedule table */
+.sched-edit-table {
+  font-size: 0.78rem;
+  font-family: monospace;
+  border-collapse: collapse;
+}
+.sched-edit-table th {
+  background: var(--bg-card);
+  color: var(--text-muted);
+  padding: 0.2rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+}
+.sched-edit-table td {
+  padding: 0.1rem 0.3rem;
+  border-bottom: 1px solid #21262d;
+}
+.sched-time-input {
+  width: 7rem;
+  background: var(--bg-base);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
+  font-family: monospace;
+  font-size: 0.78rem;
+}
+.sched-sp-input {
+  width: 5.5rem;
+  background: var(--bg-base);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
+  font-family: monospace;
+  font-size: 0.78rem;
+}
+.sched-time-input:focus,
+.sched-sp-input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 /* Data browser */

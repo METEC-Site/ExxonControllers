@@ -362,8 +362,16 @@ class DeviceManager:
                 if old_logger:
                     old_logger.close()
             rotation_minutes = self.state.get_settings().get('raw_file_rotation_minutes', 1440)
+            device_meta = {
+                'device_type': device.device_type,
+                'location':    device.device_name,
+                'serial':      getattr(device, 'serial_number', '') or '',
+                'lat':         device.lat if device.lat is not None else '',
+                'lon':         device.lon if device.lon is not None else '',
+                'alt':         device.alt if device.alt is not None else '',
+            }
             logger = RawDataLogger(device_name=device.device_name, data_dir=RAW_DATA_DIR,
-                                   rotation_minutes=rotation_minutes)
+                                   rotation_minutes=rotation_minutes, device_meta=device_meta)
             self._raw_loggers[device_id] = logger
             self._running[device_id] = True
 
@@ -597,8 +605,26 @@ class DeviceManager:
         periph = create_peripheral(cfg | {'peripheral_id': peripheral_id})
         if periph is None:
             return None
+
+        # Create a data logger for this peripheral (outside the lock — does file I/O)
+        channel_labels = getattr(periph, 'channel_labels', None) or ['ch0', 'ch1', 'ch2', 'ch3']
+        device_meta = {
+            'type':     cfg.get('type', ''),
+            'location': cfg.get('name', ''),
+            'hostname': cfg.get('hostname', ''),
+            'port':     cfg.get('port', ''),
+            'hub_port': cfg.get('hub_port', ''),
+        }
+        periph_logger = PeripheralDataLogger(
+            peripheral_name=getattr(periph, 'name', peripheral_id),
+            channel_labels=channel_labels,
+            data_dir=RAW_DATA_DIR,
+            device_meta=device_meta,
+        )
+
         with self._lock:
             self._peripherals[peripheral_id] = periph
+            self._periph_loggers[peripheral_id] = periph_logger
             self._histories[peripheral_id] = deque(maxlen=HISTORY_MAXLEN)
             if peripheral_id not in self._peripheral_order:
                 self._peripheral_order.append(peripheral_id)
@@ -970,6 +996,10 @@ class DeviceManager:
                         gevent.get_hub().threadpool.spawn(_try_reopen)
 
             readings['peripherals'][peripheral_id] = pstate
+            # Log peripheral state to CSV when connected
+            periph_logger = self._periph_loggers.get(peripheral_id)
+            if periph_logger and curr_connected:
+                periph_logger.log(now_ts, pstate.get('values', []))
             hist_entry = {'timestamp': now_ts, 'values': pstate.get('values', [])}
             self._histories[peripheral_id].append(hist_entry)
 

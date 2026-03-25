@@ -167,14 +167,15 @@ class ThermocouplePeripheral:
 
     def close(self):
         with self._op_lock:
+            self.opened = False
+            with self._lock:
+                self._connected = [False] * self.NUM_CHANNELS
             for ch in self._channels:
                 try:
                     ch.close()
                 except Exception:
                     pass
             self._channels.clear()
-            self._connected = [False] * self.NUM_CHANNELS
-            self.opened = False
             if self.server_hostname:
                 _net_remove_server(self._server_name)
 
@@ -259,7 +260,7 @@ class RelayPeripheral:
 
     @property
     def connected(self):
-        return self.opened and all(self._connected)
+        return self.opened and any(self._connected)
 
     def open(self):
         if not PHIDGET_AVAILABLE:
@@ -307,8 +308,12 @@ class RelayPeripheral:
                 return False
 
     def close(self):
-        # Set all relays off before closing
+        # Mark as closed immediately so concurrent set_channel() calls
+        # fail fast ("Device not opened") instead of hitting 0x34.
         with self._op_lock:
+            self.opened = False
+            with self._lock:
+                self._connected = [False] * self.NUM_CHANNELS
             for ch in self._channels:
                 try:
                     ch.setState(False)
@@ -316,8 +321,6 @@ class RelayPeripheral:
                 except Exception:
                     pass
             self._channels.clear()
-            self._connected = [False] * self.NUM_CHANNELS
-            self.opened = False
             if self.server_hostname:
                 _net_remove_server(self._server_name)
 
@@ -562,14 +565,15 @@ class PressureVINTPeripheral:
 
     def close(self):
         with self._op_lock:
+            self.opened = False
+            with self._lock:
+                self._channel_connected = False
             for ch in self._channels:
                 try:
                     ch.close()
                 except Exception:
                     pass
             self._channels.clear()
-            self._channel_connected = False
-            self.opened = False
             if self.server_hostname:
                 _net_remove_server(self._server_name)
 

@@ -643,11 +643,12 @@ function switchMainTab(tab) {
         <div class="mb-2">
           <label class="form-label small">Output Path</label>
           <input type="text" class="form-control form-control-sm ec-input" id="nasPath"
-                 placeholder="\\server\share\folder"
-                 value="\\metec-nas.research.colostate.edu\METEC2\ExxonProject">
+                 placeholder="/mnt/nas/share/folder  (Linux/WSL)  or  \\server\share\folder  (Windows)">
         </div>
         <p class="text-muted small mb-2">
           Appends per-device CSV files (<code>{name}_{date}.csv</code>) to the specified path each poll cycle.
+          On Linux/WSL, mount the network share first and enter its mount point (e.g. <code>/mnt/metec-nas/METEC2/ExxonProject</code>).
+          Windows UNC paths (<code>\\server\share</code>) are only valid when running natively on Windows.
         </p>
         <div class="d-flex gap-2">
           <button class="btn btn-sm btn-success" onclick="app.nasEnable()">
@@ -1130,7 +1131,7 @@ function switchMainTab(tab) {
         </p>
         <label class="form-label small">New Experiment Start Time</label>
         <input type="datetime-local" class="form-control ec-input" id="csvShiftNewStart"
-               oninput="expUI.updateCsvShiftPreview()">
+               step="1" oninput="expUI.updateCsvShiftPreview()">
         <div class="text-muted mt-1" style="font-size:0.75rem" id="csvShiftPreview"></div>
       </div>
       <div class="modal-footer">

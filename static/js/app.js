@@ -1559,9 +1559,15 @@ const app = (() => {
   function _updateNasUI(status) {
     const badge = document.getElementById('nasStatusBadge');
     if (!badge) return;
-    if (status.enabled) {
-      badge.textContent = 'Enabled';
+    if (status.enabled && status.accessible === true) {
+      badge.textContent = 'Enabled — Online';
       badge.className = 'mqtt-badge connected ms-2';
+    } else if (status.enabled && status.accessible === false) {
+      badge.textContent = 'Enabled — Offline';
+      badge.className = 'mqtt-badge disconnected ms-2';
+    } else if (status.enabled) {
+      badge.textContent = 'Enabled — Checking…';
+      badge.className = 'mqtt-badge ms-2';
     } else {
       badge.textContent = 'Disabled';
       badge.className = 'mqtt-badge disconnected ms-2';
@@ -2272,7 +2278,7 @@ const expUI = (() => {
     row.className = 'exp-device-row';
     row.id = `expDevRow-${_safeId(deviceName)}`;
 
-    const previewHtml = _buildSchedulePreviewHtml(schedule);
+    const editHtml = _buildScheduleEditHtml(deviceName, schedule);
     row.innerHTML = `
       <div class="d-flex align-items-center justify-content-between mb-2">
         <span class="fw-semibold text-info">${_escHtml(deviceName)}</span>
@@ -2286,7 +2292,7 @@ const expUI = (() => {
           </button>
         </div>
       </div>
-      <div class="schedule-step-table" id="expDevTable-${_safeId(deviceName)}">${previewHtml}</div>
+      <div class="schedule-step-table" id="expDevTable-${_safeId(deviceName)}">${editHtml}</div>
       <input type="file" class="d-none" id="expDevFile-${_safeId(deviceName)}" accept=".csv"
              onchange="expUI.handleDeviceCSVFile('${_escHtml(deviceName)}', this)">
     `;
@@ -2306,6 +2312,95 @@ const expUI = (() => {
     }).join('');
     const more = schedule.length > 50 ? `<tr><td colspan="3" style="color:#8b949e;text-align:center">… ${schedule.length - 50} more steps</td></tr>` : '';
     return `<table><thead><tr><th>Elapsed</th><th>Time (UTC)</th><th>Setpoint</th></tr></thead><tbody>${rows}${more}</tbody></table>`;
+  }
+
+  // ── Inline schedule editing ────────────────────────────────────────────────
+
+  function _buildScheduleEditHtml(deviceName, schedule) {
+    const esc = _escHtml(deviceName);
+    const safeId = _safeId(deviceName);
+    if (!schedule || schedule.length === 0) {
+      return `<div class="text-muted small text-center py-2">No steps yet.
+        <button class="btn btn-xs btn-outline-info ms-2" onclick="expUI.addScheduleRow('${esc}')"><i class="fa fa-plus me-1"></i>Add Row</button>
+      </div>`;
+    }
+    const baseMs = _editorGlobalStartIso ? new Date(_editorGlobalStartIso).getTime() : null;
+    const rows = schedule.map((s, i) => {
+      const utcCell = baseMs != null
+        ? `<td class="text-muted small" id="sched-utc-${safeId}-${i}">${new Date(baseMs + s.time * 1000).toISOString().slice(11, 19)}</td>`
+        : `<td class="text-muted small" id="sched-utc-${safeId}-${i}">—</td>`;
+      return `<tr>
+        <td><input type="text" class="sched-time-input" value="${_fmtDurationExp(s.time)}"
+             onchange="expUI._onScheduleChange('${esc}',${i},'time',this.value)" title="HH:MM:SS or seconds"></td>
+        ${utcCell}
+        <td><input type="number" class="sched-sp-input" value="${Number(s.setpoint).toFixed(3)}" step="0.001" min="0"
+             onchange="expUI._onScheduleChange('${esc}',${i},'setpoint',this.value)"></td>
+        <td><button class="btn btn-xs btn-outline-danger" onclick="expUI._deleteScheduleRow('${esc}',${i})" title="Delete row"><i class="fa fa-trash"></i></button></td>
+      </tr>`;
+    }).join('');
+    return `<table class="sched-edit-table w-100">
+      <thead><tr><th>Elapsed</th><th>UTC Time</th><th>Setpoint (SLPM)</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <button class="btn btn-xs btn-outline-info mt-1" onclick="expUI.addScheduleRow('${esc}')"><i class="fa fa-plus me-1"></i>Add Row</button>`;
+  }
+
+  /** Parse "HH:MM:SS", "MM:SS", or plain seconds string → number of seconds. */
+  function _parseTimeInput(val) {
+    val = (val || '').trim();
+    if (/^\d+(\.\d+)?$/.test(val)) return parseFloat(val);
+    const parts = val.split(':').map(Number);
+    if (parts.some(isNaN)) return null;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return null;
+  }
+
+  function _onScheduleChange(deviceName, idx, field, value) {
+    const schedule = _editorSchedules[deviceName];
+    if (!schedule || idx < 0 || idx >= schedule.length) return;
+    if (field === 'time') {
+      const parsed = _parseTimeInput(value);
+      if (parsed === null || parsed < 0) return; // ignore invalid input
+      schedule[idx].time = parsed;
+    } else if (field === 'setpoint') {
+      const parsed = parseFloat(value);
+      if (isNaN(parsed) || parsed < 0) return;
+      schedule[idx].setpoint = parsed;
+    }
+    // Refresh UTC column only (avoid full re-render which loses focus)
+    const baseMs = _editorGlobalStartIso ? new Date(_editorGlobalStartIso).getTime() : null;
+    const utcEl = document.getElementById(`sched-utc-${_safeId(deviceName)}-${idx}`);
+    if (utcEl && baseMs != null) {
+      utcEl.textContent = new Date(baseMs + schedule[idx].time * 1000).toISOString().slice(11, 19);
+    }
+    const stepsEl = document.getElementById(`expDevSteps-${_safeId(deviceName)}`);
+    if (stepsEl) stepsEl.textContent = `${schedule.length} steps`;
+  }
+
+  function _deleteScheduleRow(deviceName, idx) {
+    const schedule = _editorSchedules[deviceName];
+    if (!schedule) return;
+    schedule.splice(idx, 1);
+    _refreshDeviceTable(deviceName);
+  }
+
+  function addScheduleRow(deviceName) {
+    if (!_editorSchedules[deviceName]) _editorSchedules[deviceName] = [];
+    const schedule = _editorSchedules[deviceName];
+    const lastTime = schedule.length > 0 ? schedule[schedule.length - 1].time : 0;
+    schedule.push({ time: lastTime + 3600, setpoint: 0 });
+    _refreshDeviceTable(deviceName);
+  }
+
+  function _refreshDeviceTable(deviceName) {
+    const schedule = _editorSchedules[deviceName] || [];
+    const tableEl = document.getElementById(`expDevTable-${_safeId(deviceName)}`);
+    if (tableEl) tableEl.innerHTML = _buildScheduleEditHtml(deviceName, schedule);
+    const stepsEl = document.getElementById(`expDevSteps-${_safeId(deviceName)}`);
+    if (stepsEl) stepsEl.textContent = `${schedule.length} steps`;
+    document.getElementById('noExpDevices').style.display =
+      Object.keys(_editorSchedules).length > 0 ? 'none' : 'block';
   }
 
   function importDeviceCSV(deviceName) {
@@ -2412,11 +2507,12 @@ const expUI = (() => {
     const isPast = globalStart < new Date();
     infoEl.textContent = `Original start: ${globalStart.toLocaleString()}${isPast ? ' (in the past)' : ''}`;
 
-    // Default new start = now + 5 minutes, rounded to next minute
+    // Default new start = now + 5 minutes, seconds zeroed
     const defaultStart = new Date(Date.now() + 5 * 60000);
     defaultStart.setSeconds(0, 0);
     const pad = n => String(n).padStart(2, '0');
-    const localIso = `${defaultStart.getFullYear()}-${pad(defaultStart.getMonth()+1)}-${pad(defaultStart.getDate())}T${pad(defaultStart.getHours())}:${pad(defaultStart.getMinutes())}`;
+    // Include seconds (:00) so the step="1" input shows the full value
+    const localIso = `${defaultStart.getFullYear()}-${pad(defaultStart.getMonth()+1)}-${pad(defaultStart.getDate())}T${pad(defaultStart.getHours())}:${pad(defaultStart.getMinutes())}:00`;
     const input = document.getElementById('csvShiftNewStart');
     input.value = localIso;
     input.removeAttribute('min');  // don't constrain — user may pick any time
@@ -2439,8 +2535,9 @@ const expUI = (() => {
     const tMax = allTimes.length ? Math.max(...allTimes) : 0;
     const runDuration = tMax - tMin;   // actual schedule span, unchanged by shift
     // Delay from now (what the schedule engine will actually wait before first event)
-    const desiredDelayS = Math.max(0, (newStart.getTime() - Date.now()) / 1000);
-    previewEl.textContent = `Devices: ${deviceNames} · Delay: +${_formatDuration(desiredDelayS)} · Total run: ${_formatDuration(runDuration)}`;
+    const desiredDelayS = Math.max(0, Math.round((newStart.getTime() - Date.now()) / 1000));
+    const endTime = new Date(newStart.getTime() + runDuration * 1000);
+    previewEl.textContent = `Devices: ${deviceNames} · Start: ${newStart.toLocaleTimeString()} · End: ${endTime.toLocaleTimeString()} · Delay: +${_formatDuration(desiredDelayS)} · Run: ${_formatDuration(runDuration)}`;
   }
 
   function _formatDuration(seconds) {
@@ -2469,7 +2566,8 @@ const expUI = (() => {
     // Using global_start_iso (which can be hours in the past) would produce a delay of hours.
     const allTimes = Object.values(_pendingCsvData.schedules).flat().map(e => e.time);
     const tMin = allTimes.length ? Math.min(...allTimes) : 0;
-    const desiredDelayS = Math.max(0, (newStart.getTime() - Date.now()) / 1000);
+    // Round to whole seconds so floating-point drift doesn't produce e.g. "00:10:00.550"
+    const desiredDelayS = Math.max(0, Math.round((newStart.getTime() - Date.now()) / 1000));
     const shift = desiredDelayS - tMin;  // normalise tMin to become desiredDelayS
     const shifted = {};
     for (const [dev, schedule] of Object.entries(_pendingCsvData.schedules)) {
@@ -2567,7 +2665,7 @@ const expUI = (() => {
         _addDeviceScheduleRowElement(deviceName, schedule);
       } else {
         const tableEl = document.getElementById(`expDevTable-${_safeId(deviceName)}`);
-        if (tableEl) tableEl.innerHTML = _buildSchedulePreviewHtml(schedule);
+        if (tableEl) tableEl.innerHTML = _buildScheduleEditHtml(deviceName, schedule);
         const stepsEl = document.getElementById(`expDevSteps-${_safeId(deviceName)}`);
         if (stepsEl) stepsEl.textContent = `${schedule.length} steps`;
       }
@@ -2629,9 +2727,9 @@ const expUI = (() => {
       }
 
       _editorSchedules[deviceName] = schedule;
-      // Update preview table
+      // Update editable table
       const tableEl = document.getElementById(`expDevTable-${_safeId(deviceName)}`);
-      if (tableEl) tableEl.innerHTML = _buildSchedulePreviewHtml(schedule);
+      if (tableEl) tableEl.innerHTML = _buildScheduleEditHtml(deviceName, schedule);
       const stepsEl = document.getElementById(`expDevSteps-${_safeId(deviceName)}`);
       if (stepsEl) stepsEl.textContent = `${schedule.length} steps`;
     } catch (e) {
@@ -3021,6 +3119,9 @@ const expUI = (() => {
     applyCsvNoShift,
     applyCsvWithShift,
     removeDeviceRow,
+    addScheduleRow,
+    _onScheduleChange,
+    _deleteScheduleRow,
     saveExperiment,
     exportExperimentJson,
     deleteExperiment,

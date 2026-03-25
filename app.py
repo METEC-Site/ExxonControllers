@@ -279,7 +279,7 @@ def on_kick_session(data):
                 break
     if target_sid:
         socketio.emit('kicked', {}, to=target_sid)
-        socketio.disconnect(target_sid)
+        socketio.server.disconnect(target_sid)
 
 
 @socketio.on('send_chat')
@@ -1506,12 +1506,22 @@ def _polling_loop():
                     if device:
                         mqtt_relay.publish_reading(device.device_name, reading)
 
-            # NAS relay — echo each device reading to CSV files
+            # NAS relay — echo each device reading to CSV files.
+            # Raw data is always written; experiment data is also mirrored to a
+            # per-experiment subdirectory when an experiment is running.
             if nas_relay.is_enabled:
+                exp_logger = device_mgr._exp_logger
+                exp_subdir = None
+                if exp_logger:
+                    exp_subdir = os.path.join('Experiments',
+                                              os.path.basename(exp_logger.data_dir))
                 for device_id, reading in readings.get('alicat', {}).items():
                     device = device_mgr._alicat.get(device_id)
                     if device:
                         nas_relay.write_reading(device.device_name, reading)
+                        if exp_subdir:
+                            nas_relay.write_reading(device.device_name, reading,
+                                                    subdir=exp_subdir)
 
             heartbeat_tick += 1
             if heartbeat_tick >= 5:
@@ -1637,7 +1647,10 @@ if __name__ == '__main__':
     nas_cfg = state.get_settings().get('nas', {})
     if nas_cfg.get('enabled') and nas_cfg.get('path'):
         nas_relay.restore(nas_cfg['path'])
-        print(f"  NAS File Echo: restored → {nas_cfg['path']}")
+        if nas_relay.is_enabled:
+            print(f"  NAS File Echo: restored → {nas_cfg['path']}")
+        else:
+            print(f"  NAS File Echo: path invalid for this OS (kept disabled) → {nas_cfg['path']}")
 
     device_count = len(saved_config.get('alicat', {}))
     periph_count = len(saved_config.get('peripherals', {}))
