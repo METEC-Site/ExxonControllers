@@ -1,0 +1,24 @@
+# Claude Code
+.claude/
+
+# Data and logs
+Data/
+backups/
+
+# Testing and notes
+Testing/
+Notes/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db

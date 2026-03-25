@@ -1,0 +1,1631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ExxonController</title>
+  <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
+  <link href="/static/vendor/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/vendor/css/font-awesome.min.css" rel="stylesheet">
+  <link href="/static/css/style.css" rel="stylesheet">
+  <link href="/static/vendor/css/leaflet.css" rel="stylesheet">
+</head>
+<body>
+
+<!-- ── Navbar ──────────────────────────────────────────────────────────────── -->
+<nav class="navbar navbar-dark ec-navbar px-3 py-2">
+  <span class="navbar-brand mb-0 d-flex align-items-center">
+    <strong class="me-2">ExxonController</strong>
+    <span class="text-muted me-3" style="font-size:0.7rem">v{{ version }}</span>
+    <span class="navbar-status-sep me-3"></span>
+    <span class="status-dot me-1" id="wsSocketDot" title="Socket.IO: connecting…"></span>
+    <span class="status-text" id="wsStatusText">connecting…</span>
+  </span>
+  <div class="d-flex align-items-center gap-3">
+    <span class="ec-session-indicator" id="sessionCount"
+          data-bs-toggle="modal" data-bs-target="#sessionsModal"
+          title="View connected sessions & chat">
+      <i class="fa fa-users me-1"></i><span id="sessionCountNum">0</span> connected
+      <span class="chat-unread-badge d-none" id="chatUnreadBadge">0</span>
+    </span>
+    <span class="text-muted small">
+      <i class="fa fa-user me-1"></i>{{ username }}
+    </span>
+    <button class="btn btn-sm btn-outline-info" onclick="expUI.openDataBrowser()" title="Browse & Download Data">
+      <i class="fa fa-database me-1"></i>Data
+    </button>
+    <button class="btn btn-sm btn-outline-secondary" onclick="location.reload(true)" title="Hard Refresh (clear cache)">
+      <i class="fa fa-rotate-right"></i>
+    </button>
+    <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#settingsModal">
+      <i class="fa fa-gear"></i>
+    </button>
+    <a href="/logout" class="btn btn-sm btn-outline-danger">
+      <i class="fa fa-right-from-bracket"></i>
+    </a>
+  </div>
+</nav>
+
+<!-- ── Kicked Popup ─────────────────────────────────────────────────────── -->
+<div id="kickedOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:99999;align-items:center;justify-content:center;flex-direction:column">
+  <img src="/static/img/output.gif" alt="" style="width:min(720px,67vw);border-radius:10px;border:2px solid #f85149;box-shadow:0 0 40px rgba(248,81,73,0.4)">
+  <div style="margin-top:1rem;color:#f85149;font-weight:600;font-size:1rem">You have been removed from this session.</div>
+  <button onclick="window.location.href='/logout'" style="margin-top:1rem;background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:0.45rem 1.4rem;border-radius:6px;font-size:0.9rem;cursor:pointer">Go to Login</button>
+</div>
+
+<!-- ── Disconnection Banner ───────────────────────────────────────────────── -->
+<div id="disconnectBanner" class="d-none disconnect-banner">
+  <i class="fa fa-triangle-exclamation me-2"></i>
+  <strong>Lost connection to server.</strong>
+  &nbsp;Attempting to reconnect automatically&hellip;
+  &nbsp;&mdash;&nbsp;
+  <a href="javascript:location.reload()" class="disconnect-banner-link">Refresh the page</a>
+  if the problem persists.
+</div>
+
+<!-- ── Main Layout ─────────────────────────────────────────────────────────── -->
+<div class="ec-layout">
+
+  <!-- Left Panel: Devices + Peripherals -->
+  <div class="ec-sidebar" id="devicePanel">
+
+    <!-- Alicat Flow Controllers -->
+    <div class="panel-section">
+      <div class="panel-header d-flex justify-content-between align-items-center">
+        <span class="section-collapse-toggle" onclick="app.toggleSectionCollapse('devices')" title="Collapse/expand">
+          <i class="fa fa-chevron-down me-1" id="sectionChevron-devices"></i>
+          <i class="fa fa-wind me-2 text-info"></i>Flow Controllers
+        </span>
+        <div class="d-flex align-items-center gap-1">
+          <button class="btn btn-xs btn-outline-secondary" title="Collapse all devices" onclick="app.collapseAllDevices()">
+            <i class="fa fa-compress-alt"></i>
+          </button>
+          <button class="btn btn-xs btn-outline-secondary" title="Expand all devices" onclick="app.expandAllDevices()">
+            <i class="fa fa-expand-alt"></i>
+          </button>
+          <button class="btn btn-sm btn-success" data-bs-toggle="modal" data-bs-target="#addDeviceModal">
+            <i class="fa fa-plus"></i> Add
+          </button>
+        </div>
+      </div>
+      <div id="deviceLedStrip" class="section-led-strip d-none"></div>
+      <div id="deviceList">
+        <div class="text-muted text-center py-3 small" id="noDevicesMsg">
+          No devices configured. Click <strong>Add</strong> to connect a flow controller.
+        </div>
+      </div>
+    </div>
+
+    <!-- Peripherals -->
+    <div class="panel-section mt-2">
+      <div class="panel-header d-flex justify-content-between align-items-center">
+        <span class="section-collapse-toggle" onclick="app.toggleSectionCollapse('peripherals')" title="Collapse/expand">
+          <i class="fa fa-chevron-down me-1" id="sectionChevron-peripherals"></i>
+          <i class="fa fa-microchip me-2 text-warning"></i>Peripherals
+        </span>
+        <button class="btn btn-sm btn-warning text-dark" data-bs-toggle="modal" data-bs-target="#addPeripheralModal"
+          {% if not phidget_available %}title="Phidget22 library not installed" disabled{% endif %}>
+          <i class="fa fa-plus"></i> Add
+        </button>
+      </div>
+      <div id="peripheralLedStrip" class="section-led-strip d-none"></div>
+      {% if not phidget_available %}
+      <div class="alert alert-sm text-muted small py-1 px-2 mt-1" style="background:#1c1f26;border:1px solid #30363d;">
+        <i class="fa fa-triangle-exclamation text-warning me-1"></i>Phidget22 not installed.
+        <code>pip install Phidget22</code>
+      </div>
+      {% endif %}
+      <div id="peripheralList">
+        <div class="text-muted text-center py-2 small" id="noPeripheralsMsg">
+          No peripherals configured.
+        </div>
+      </div>
+    </div>
+
+    <!-- Solenoid Pre-Run Checklist (global) -->
+    <div class="panel-section mt-2">
+      <div class="panel-header d-flex justify-content-between align-items-center">
+        <span><i class="fa fa-toggle-on me-2 text-warning"></i>Experiment Checklist</span>
+        <button class="btn btn-sm btn-outline-warning" onclick="app.addGlobalChecklistRow()">
+          <i class="fa fa-plus"></i>
+        </button>
+      </div>
+      <div class="px-1 pt-1">
+        <div class="text-muted small text-center py-1" id="noGlobalChecklist">
+          No checklist items. Add pre/post-run relay state checks for any experiment.
+        </div>
+        <div id="globalChecklistRows"></div>
+      </div>
+    </div>
+
+    <!-- Experiments -->
+    <div class="panel-section mt-2">
+      <div class="panel-header d-flex justify-content-between align-items-center">
+        <span><i class="fa fa-flask-vial me-2 text-purple"></i>Experiments</span>
+        <div class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-secondary" onclick="expUI.openImportExperiment()" title="Import JSON">
+            <i class="fa fa-file-import"></i>
+          </button>
+          <button class="btn btn-sm btn-purple" onclick="expUI.openNewExperiment()">
+            <i class="fa fa-plus"></i> New
+          </button>
+        </div>
+      </div>
+
+      <!-- Running experiment banner -->
+      <div id="runningExperimentBanner" class="d-none running-exp-banner mb-2">
+        <div class="d-flex align-items-center justify-content-between">
+          <div>
+            <i class="fa fa-circle-play text-success me-1"></i>
+            <strong id="runningExpName">—</strong>
+            <span class="text-muted small ms-2" id="runningExpElapsed">—</span>
+          </div>
+          <button class="btn btn-xs btn-outline-danger" onclick="expUI.stopExperiment()">Stop</button>
+        </div>
+        <div class="text-muted" style="font-size:0.7rem" id="runningExpDir"></div>
+      </div>
+
+      <div id="experimentList">
+        <div class="text-muted text-center py-2 small" id="noExperimentsMsg">
+          No experiments saved. Click <strong>New</strong> to create one.
+        </div>
+      </div>
+    </div>
+
+
+  </div><!-- /ec-sidebar -->
+
+  <!-- Right Panel: Tabbed (Plots / Map) -->
+  <div class="ec-main">
+
+    <!-- Tab bar -->
+    <div class="ec-main-tabbar">
+      <button class="ec-main-tab active" id="tabBtnPlots" onclick="switchMainTab('plots')">
+        <i class="fa fa-chart-line me-1"></i>Plots
+      </button>
+      <button class="ec-main-tab" id="tabBtnMap" onclick="switchMainTab('map')">
+        <i class="fa fa-map-location-dot me-1"></i>Map
+      </button>
+      <button class="ec-main-tab" id="tabBtnReview" onclick="switchMainTab('review')">
+        <i class="fa fa-flask-vial me-1"></i>Experiment
+      </button>
+      <button class="ec-main-tab" id="tabBtnLogs" onclick="switchMainTab('logs')">
+        <i class="fa fa-terminal me-1"></i>Logs
+      </button>
+    </div>
+
+    <!-- Plots tab pane -->
+    <div id="plotsView" class="ec-main-pane">
+
+      <!-- Plot 1 -->
+      <div class="plot-panel" id="plot1Panel">
+        <div class="plot-header d-flex justify-content-between align-items-center">
+          <span class="fw-semibold"><i class="fa fa-chart-line me-2 text-info"></i>Plot 1</span>
+          <div class="d-flex align-items-center gap-2">
+            <div id="plot1Channels" class="channel-tags"></div>
+            <button class="btn btn-sm btn-outline-secondary" onclick="plots.showChannelSelector(1)">
+              <i class="fa fa-plus"></i> Channel
+            </button>
+            <select class="form-select form-select-sm ec-select" id="plot1TimeRange" style="width:90px"
+                    onchange="plots.setTimeRange(1, this.value)">
+              <option value="60">1 min</option>
+              <option value="300" selected>5 min</option>
+              <option value="900">15 min</option>
+              <option value="3600">1 hr</option>
+              <option value="0">All</option>
+            </select>
+            <button class="btn btn-sm btn-outline-danger" onclick="plots.clearPlot(1)" title="Clear plot">
+              <i class="fa fa-trash"></i>
+            </button>
+          </div>
+        </div>
+        <div class="plot-area">
+          <canvas id="plot1Canvas"></canvas>
+          <div class="plot-empty" id="plot1Empty">
+            <i class="fa fa-chart-area fa-2x mb-2 text-muted"></i>
+            <div class="text-muted small">Add channels using the <strong>+ Channel</strong> button</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Plot 2 -->
+      <div class="plot-panel" id="plot2Panel">
+        <div class="plot-header d-flex justify-content-between align-items-center">
+          <span class="fw-semibold"><i class="fa fa-chart-line me-2 text-warning"></i>Plot 2</span>
+          <div class="d-flex align-items-center gap-2">
+            <div id="plot2Channels" class="channel-tags"></div>
+            <button class="btn btn-sm btn-outline-secondary" onclick="plots.showChannelSelector(2)">
+              <i class="fa fa-plus"></i> Channel
+            </button>
+            <select class="form-select form-select-sm ec-select" id="plot2TimeRange" style="width:90px"
+                    onchange="plots.setTimeRange(2, this.value)">
+              <option value="60">1 min</option>
+              <option value="300" selected>5 min</option>
+              <option value="900">15 min</option>
+              <option value="3600">1 hr</option>
+              <option value="0">All</option>
+            </select>
+            <button class="btn btn-sm btn-outline-danger" onclick="plots.clearPlot(2)" title="Clear plot">
+              <i class="fa fa-trash"></i>
+            </button>
+          </div>
+        </div>
+        <div class="plot-area">
+          <canvas id="plot2Canvas"></canvas>
+          <div class="plot-empty" id="plot2Empty">
+            <i class="fa fa-chart-area fa-2x mb-2 text-muted"></i>
+            <div class="text-muted small">Add channels using the <strong>+ Channel</strong> button</div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /plotsView -->
+
+    <!-- Map tab pane -->
+    <div id="mapView" class="ec-main-pane d-none">
+      <div class="plot-panel map-panel" id="mapPanel">
+        <div class="plot-header d-flex justify-content-between align-items-center">
+          <span class="fw-semibold"><i class="fa fa-map-location-dot me-2 text-success"></i>Map View</span>
+          <div class="d-flex align-items-center gap-2">
+            <button class="btn btn-sm btn-outline-secondary" onclick="ecMap.fitToMarkers()" title="Fit to markers">
+              <i class="fa fa-compress-arrows-alt"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-info" onclick="ecMap.openOverlayManager()" title="Manage image overlays">
+              <i class="fa fa-image me-1"></i>Overlay
+            </button>
+            <button class="btn btn-sm btn-outline-warning" onclick="ecMap.openTileCache()" title="Cache map tiles for offline use">
+              <i class="fa fa-download me-1"></i>Cache Tiles
+            </button>
+          </div>
+        </div>
+        <div id="mapContainer" class="map-container"></div>
+      </div>
+    </div><!-- /mapView -->
+
+    <!-- Experiment tab pane (was Review) -->
+    <div id="reviewView" class="ec-main-pane d-none">
+
+      <!-- TOP: Live schedule preview / run progress chart -->
+      <div class="exp-viewer-panel">
+        <div class="exp-viewer-header">
+          <span><i class="fa fa-flask-vial me-1 text-info"></i>Experiment Schedule</span>
+          <div class="d-flex align-items-center gap-2">
+            <select id="expViewerSel" class="form-select form-select-sm ec-select" style="width:260px"
+                    onchange="expViewerUI.selectExperiment(this.value)">
+              <option value="">— select experiment to preview —</option>
+            </select>
+            <span id="expViewerRunBadge" class="d-none" style="color:var(--success);font-size:0.78rem;font-weight:600">● Running</span>
+            <button id="expViewerResetZoom" class="btn btn-xs btn-outline-secondary d-none"
+                    onclick="expViewerUI.resetZoom()" title="Reset zoom">
+              <i class="fa fa-magnifying-glass-minus me-1"></i>Reset Zoom
+            </button>
+          </div>
+        </div>
+        <div id="expViewerPlaceholder" class="ev-placeholder">
+          <i class="fa fa-flask-vial fa-2x text-muted"></i>
+          <span class="text-muted small">Select an experiment above to preview its setpoint schedule</span>
+        </div>
+        <div id="expViewerChartWrap" class="d-none ev-chart-wrap" style="position:relative">
+          <canvas id="expViewerChart"></canvas>
+          <div id="expViewerSelBox" style="display:none;position:absolute;top:0;bottom:0;background:rgba(88,166,255,0.15);border:1px solid rgba(88,166,255,0.6);pointer-events:none"></div>
+        </div>
+        <div id="expViewerNowInfo" class="d-none ev-now-info"></div>
+      </div>
+
+      <!-- BOTTOM: Historical completed-run review -->
+      <div class="review-body">
+
+        <!-- Left sidebar: list of completed experiment data folders -->
+        <div class="review-sidebar">
+          <div class="review-sidebar-header">
+            <span><i class="fa fa-folder-open me-1"></i>Completed Runs</span>
+            <button class="btn btn-xs btn-outline-secondary" onclick="reviewUI.refreshList()" title="Refresh list">
+              <i class="fa fa-rotate-right"></i>
+            </button>
+          </div>
+          <div class="review-exp-list" id="reviewExpList">
+            <div class="text-muted small px-2 py-3 text-center">Click to load completed runs.</div>
+          </div>
+        </div>
+
+        <!-- Right: chart & controls -->
+        <div class="review-main">
+          <!-- Toolbar -->
+          <div class="review-toolbar">
+            <div id="reviewMetaHeader" class="me-auto" style="font-size:0.82rem"></div>
+            <label class="text-muted small mb-0">Channel:</label>
+            <select class="form-select form-select-sm ec-select" id="reviewChannelSel"
+                    style="width:130px" onchange="reviewUI.redraw()">
+            </select>
+            <div id="reviewDeviceChecks"></div>
+            <button class="btn btn-sm btn-outline-success d-none" id="reviewDownloadBtn"
+                    onclick="reviewUI.downloadCsv()" title="Download experiment CSV">
+              <i class="fa fa-download me-1"></i>CSV
+            </button>
+          </div>
+          <!-- Status / error -->
+          <div id="reviewStatus" class="d-none text-muted small px-3 py-2"></div>
+          <!-- Chart -->
+          <div class="review-chart-area">
+            <div class="review-placeholder" id="reviewPlaceholder">
+              <i class="fa fa-magnifying-glass-chart fa-2x text-muted"></i>
+              <span>Select a completed run from the list</span>
+            </div>
+            <div id="reviewChartWrap" class="d-none" style="height:100%">
+              <canvas id="reviewChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div><!-- /review-body -->
+
+    </div><!-- /reviewView -->
+
+    <!-- Logs tab pane -->
+    <div id="logsView" class="ec-main-pane d-none">
+      <div style="height:100%;display:flex;flex-direction:column;padding:0.75rem;gap:0.5rem">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span style="font-size:0.8rem;color:#8b949e"><i class="fa fa-terminal me-1"></i>Server Logs</span>
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <input id="logFilterInput" type="text" class="form-control form-control-sm ec-input"
+                   placeholder="Filter…" style="width:160px;font-size:0.75rem"
+                   oninput="filterServerLogs()">
+            <div class="d-flex gap-1">
+              <button class="btn btn-xs log-filter-btn active" data-level="all"    onclick="setLogLevel(this)">All</button>
+              <button class="btn btn-xs log-filter-btn"        data-level="info"   onclick="setLogLevel(this)" style="color:#58a6ff">Info</button>
+              <button class="btn btn-xs log-filter-btn"        data-level="warning" onclick="setLogLevel(this)" style="color:#d29922">Warn</button>
+              <button class="btn btn-xs log-filter-btn"        data-level="error"  onclick="setLogLevel(this)" style="color:#f85149">Error</button>
+            </div>
+            <button class="btn btn-xs btn-outline-secondary" onclick="clearServerLogs()">
+              <i class="fa fa-trash me-1"></i>Clear
+            </button>
+          </div>
+        </div>
+        <div id="serverLogPane" style="flex:1;overflow-y:auto;background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:0.5rem;font-family:monospace;font-size:0.75rem;line-height:1.6"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+function switchMainTab(tab) {
+  ['plots','map','review','logs'].forEach(t => {
+    document.getElementById(t + 'View').classList.toggle('d-none', t !== tab);
+    document.getElementById('tabBtn' + t.charAt(0).toUpperCase() + t.slice(1))
+            .classList.toggle('active', t === tab);
+  });
+  if (tab === 'map'    && window.ecMap)        window.ecMap.onTabShow();
+  if (tab === 'review' && window.reviewUI)    window.reviewUI.onTabShow();
+  if (tab === 'review' && window.expViewerUI) window.expViewerUI.onTabShow();
+}
+</script>
+
+<!-- ── MODALS ────────────────────────────────────────────────────────────────── -->
+
+<!-- Add Alicat Device Modal -->
+<div class="modal fade" id="addDeviceModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-plus-circle me-2 text-success"></i>Add Flow Controller</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Device Name <span class="text-muted small">(label for UI)</span></label>
+          <input type="text" class="form-control ec-input" id="addDeviceName" placeholder="e.g. MFC-1">
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-8">
+            <label class="form-label">IP Address / Hostname</label>
+            <input type="text" class="form-control ec-input" id="addDeviceHost" placeholder="192.168.1.100">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Port</label>
+            <input type="number" class="form-control ec-input" id="addDevicePort" value="502">
+          </div>
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <label class="form-label">Device Type</label>
+            <select class="form-select ec-input" id="addDeviceType">
+              <option value="AUTO">Auto-detect (recommended)</option>
+              <option value="MCP">MCP / MCR Series</option>
+              <option value="MC">MC Series</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Modbus Unit ID</label>
+            <input type="number" class="form-control ec-input" id="addDeviceUnitId" value="1" min="1" max="247">
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Max Flow (SLPM) <span class="text-muted small">— leave blank to auto-detect</span></label>
+          <input type="number" class="form-control ec-input" id="addDeviceMaxFlow"
+                 placeholder="Auto-detect" step="0.01" min="0">
+        </div>
+        <div class="mb-3">
+          <div class="d-flex align-items-center justify-content-between mb-1">
+            <label class="form-label mb-0">Location <span class="text-danger small">*</span></label>
+            <button type="button" class="btn btn-xs btn-outline-warning" onclick="app.pickGeoLocation('add')" title="Click a point on the map">
+              <i class="fa fa-crosshairs me-1"></i>Pick on Map
+            </button>
+          </div>
+          <div class="row g-2">
+            <div class="col-6">
+              <input type="number" class="form-control ec-input" id="addDeviceLat"
+                     placeholder="Latitude" step="any">
+            </div>
+            <div class="col-6">
+              <input type="number" class="form-control ec-input" id="addDeviceLon"
+                     placeholder="Longitude" step="any">
+            </div>
+          </div>
+          <div class="row g-2 mt-1">
+            <div class="col-6">
+              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Altitude (m ASL)</label>
+              <input type="number" class="form-control ec-input" id="addDeviceAlt"
+                     placeholder="Auto from map" step="any">
+            </div>
+            <div class="col-6">
+              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Height AGL (m)</label>
+              <input type="number" class="form-control ec-input" id="addDeviceAgl"
+                     placeholder="—" step="any">
+              <div class="form-text text-muted" id="addDeviceAglHint" style="font-size:0.68rem;min-height:1em"></div>
+            </div>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Expected Serial # <span class="text-danger small">*</span></label>
+          <input type="text" class="form-control ec-input" id="addDeviceExpSerial" placeholder="e.g. 123456">
+        </div>
+        <div id="addDeviceError" class="alert alert-danger py-2 small d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-success" onclick="app.addDevice()">
+          <i class="fa fa-plug me-1"></i>Connect
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Peripheral Modal -->
+<div class="modal fade" id="addPeripheralModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-microchip me-2 text-warning"></i>Add Peripheral</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Name</label>
+          <input type="text" class="form-control ec-input" id="addPeriphName" placeholder="e.g. TC Board 1">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Type</label>
+          <select class="form-select ec-input" id="addPeriphType" onchange="app.updatePeriphFields()">
+            <option value="thermocouple">Thermocouple (4x, Phidget TMP1101)</option>
+            <option value="relay">Solid State Relay (4x, Phidget REL1100)</option>
+            <option value="relay_mechanical">Mechanical Relay (4x, Phidget REL1000)</option>
+            <option value="pressure_vint">Raw Voltage Input (bare VINT port)</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Hub Serial # <span class="text-muted small">(optional)</span></label>
+          <input type="number" class="form-control ec-input" id="addPeriphSerial" placeholder="Any">
+        </div>
+        <!-- Network Hub (optional) -->
+        <div class="mb-2">
+          <label class="form-label">Network Hub Hostname / IP <span class="text-muted small">(leave blank for USB)</span></label>
+          <input type="text" class="form-control ec-input" id="addPeriphServerHost" placeholder="e.g. 192.168.1.50">
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <label class="form-label">Network Server Port</label>
+            <input type="number" class="form-control ec-input" id="addPeriphServerPort" value="5661" min="1" max="65535">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Hub Password <span class="text-muted small">(optional)</span></label>
+            <input type="text" class="form-control ec-input" id="addPeriphServerPass" placeholder="">
+          </div>
+        </div>
+        <!-- VINT Hub Port — shown for all types -->
+        <div class="mb-3">
+          <label class="form-label">VINT Hub Port <span class="text-muted small">(0–5, leave blank = any)</span></label>
+          <input type="number" class="form-control ec-input" id="addPeriphHubPortCommon" placeholder="Any" min="0" max="5">
+        </div>
+        <!-- Pressure-specific fields (shown only for pressure_vint) -->
+        <div id="pressureCalFields" class="d-none">
+          <div class="mb-2">
+            <label class="form-label">Pressure Unit</label>
+            <input type="text" class="form-control ec-input" id="addPeriphUnits" value="psia">
+          </div>
+          <small class="text-muted d-block mb-1">Calibration: pressure = (voltage_ratio × scale) + offset</small>
+          <div class="row g-1">
+            <div class="col-6">
+              <small class="text-muted">Scale</small>
+              <input type="number" class="form-control form-control-sm ec-input" id="calScale0" value="1.0" step="0.01">
+            </div>
+            <div class="col-6">
+              <small class="text-muted">Offset</small>
+              <input type="number" class="form-control form-control-sm ec-input" id="calOffset0" value="0.0" step="0.01">
+            </div>
+          </div>
+        </div>
+        <div id="addPeriphError" class="alert alert-danger py-2 small d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning text-dark" onclick="app.addPeripheral()">
+          <i class="fa fa-plus me-1"></i>Add Peripheral
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Channel Selector Modal (for plots) -->
+<div class="modal fade" id="channelSelectorModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title" id="channelSelectorTitle"><i class="fa fa-chart-line me-2"></i>Add Channel to Plot</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="channelSelectorList" class="channel-selector-list"></div>
+        <div class="text-muted small text-center mt-2" id="channelSelectorEmpty">
+          No devices available to plot.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-gear me-2"></i>Settings</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <h6 class="text-muted mb-3">Change Password</h6>
+        <div class="mb-2">
+          <label class="form-label">New Password</label>
+          <input type="password" class="form-control ec-input" id="newPassword" placeholder="Min 4 characters">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Confirm Password</label>
+          <input type="password" class="form-control ec-input" id="confirmPassword">
+        </div>
+        <div id="settingsMsg" class="d-none"></div>
+
+        <hr class="border-secondary my-3">
+        <h6 class="text-muted mb-2">
+          <i class="fa fa-tower-broadcast me-1"></i>MQTT Data Relay
+          <span class="mqtt-badge disconnected ms-2" id="mqttStatusBadge">Disconnected</span>
+        </h6>
+        <div class="row g-2 mb-2">
+          <div class="col-7">
+            <label class="form-label small">Broker Host</label>
+            <input type="text" class="form-control form-control-sm ec-input" id="mqttHost" placeholder="e.g. 192.168.1.100">
+          </div>
+          <div class="col-2">
+            <label class="form-label small">Port</label>
+            <input type="number" class="form-control form-control-sm ec-input" id="mqttPort" value="1883" min="1" max="65535">
+          </div>
+          <div class="col-3">
+            <label class="form-label small">Topic Prefix</label>
+            <input type="text" class="form-control form-control-sm ec-input" id="mqttPrefix" value="ec" placeholder="ec">
+          </div>
+        </div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-success" onclick="app.mqttConnect()">
+            <i class="fa fa-plug me-1"></i>Connect
+          </button>
+          <button class="btn btn-sm btn-outline-danger" onclick="app.mqttDisconnect()">Disconnect</button>
+        </div>
+        <div id="mqttMsg" class="d-none mt-2 small"></div>
+
+        <hr class="border-secondary my-3">
+        <h6 class="text-muted mb-2">
+          <i class="fa fa-folder-open me-1"></i>NAS File Echo
+          <span class="mqtt-badge disconnected ms-2" id="nasStatusBadge">Disabled</span>
+        </h6>
+        <div class="mb-2">
+          <label class="form-label small">Output Path</label>
+          <input type="text" class="form-control form-control-sm ec-input" id="nasPath"
+                 placeholder="\\server\share\folder"
+                 value="\\metec-nas.research.colostate.edu\METEC2\ExxonProject">
+        </div>
+        <p class="text-muted small mb-2">
+          Appends per-device CSV files (<code>{name}_{date}.csv</code>) to the specified path each poll cycle.
+        </p>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-success" onclick="app.nasEnable()">
+            <i class="fa fa-folder-plus me-1"></i>Enable
+          </button>
+          <button class="btn btn-sm btn-outline-danger" onclick="app.nasDisable()">Disable</button>
+        </div>
+        <div id="nasMsg" class="d-none mt-2 small"></div>
+
+        <hr class="border-secondary my-3">
+        <h6 class="text-muted mb-2"><i class="fa fa-file-csv me-1"></i>File Rotation</h6>
+        <p class="text-muted small mb-2">
+          Controls when new CSV files are started. Raw data files rotate on the selected interval
+          (aligned to UTC boundaries). Experiment files split into numbered segments if a duration
+          limit is set.
+        </p>
+        <div class="row g-2 mb-2">
+          <div class="col-6">
+            <label class="form-label small">Raw Data Files</label>
+            <select class="form-select form-select-sm ec-input" id="rawFileRotation">
+              <option value="60">Every 1 hour</option>
+              <option value="360">Every 6 hours</option>
+              <option value="720">Every 12 hours</option>
+              <option value="1440" selected>Daily (00:00 UTC)</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label small">Experiment Files</label>
+            <select class="form-select form-select-sm ec-input" id="expFileRotation">
+              <option value="0" selected>No split (one file)</option>
+              <option value="60">Every 1 hour</option>
+              <option value="360">Every 6 hours</option>
+              <option value="720">Every 12 hours</option>
+              <option value="1440">Daily (24 hours)</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn btn-sm btn-primary" onclick="app.saveFileRotationSettings()">
+          <i class="fa fa-save me-1"></i>Save
+        </button>
+        <div id="fileRotationMsg" class="d-none mt-2 small"></div>
+
+        <hr class="border-secondary my-3">
+        <h6 class="text-muted mb-2"><i class="fa fa-power-off me-1 text-danger"></i>Shutdown Server</h6>
+        <p class="text-muted small mb-2">Stops the ExxonController server process. Close all browser tabs after shutting down.</p>
+        <button class="btn btn-sm btn-outline-danger" id="shutdownBtn" onclick="app.shutdownServer()">
+          <i class="fa fa-power-off me-1"></i>Shut Down Server
+        </button>
+        <div id="shutdownMsg" class="d-none mt-2 small"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary" onclick="app.updatePassword()">Save Password</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Crash Recovery Modal -->
+<div class="modal fade" id="crashRecoveryModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content ec-modal" style="border-color:#f85149;">
+      <div class="modal-header" style="border-color:#f85149;background:rgba(218,54,51,0.1);">
+        <h5 class="modal-title text-danger">
+          <i class="fa fa-triangle-exclamation me-2"></i>System Crash / Power Outage Detected
+        </h5>
+      </div>
+      <div class="modal-body">
+        <div class="alert" style="background:rgba(218,54,51,0.1);border:1px solid rgba(218,54,51,0.3);">
+          <div class="row">
+            <div class="col-sm-6">
+              <strong>Last Heartbeat:</strong><br>
+              <span id="crashLastHeartbeat" class="text-muted small">—</span>
+            </div>
+            <div class="col-sm-6">
+              <strong>Estimated Downtime:</strong><br>
+              <span id="crashDowntime" class="text-danger fw-bold fs-5">—</span>
+            </div>
+          </div>
+        </div>
+        <p class="mb-2">The following devices were running at the time of the crash:</p>
+        <div id="crashDeviceList" class="mb-3"></div>
+        <div class="alert alert-warning py-2">
+          <i class="fa fa-info-circle me-1"></i>
+          If you choose to <strong>Resume</strong>, the experiment schedules will continue
+          from the point of the crash. Any data logged during the downtime is lost.
+          If you choose <strong>Dismiss</strong>, devices will start in a stopped state.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="app.crashRecoveryResponse(false)">
+          <i class="fa fa-xmark me-1"></i>Dismiss — Start Fresh
+        </button>
+        <button type="button" class="btn btn-success" onclick="app.crashRecoveryResponse(true)">
+          <i class="fa fa-play me-1"></i>Resume Experiment
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Set Setpoint Modal (per-device) -->
+<div class="modal fade" id="setpointModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-sm">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-sliders me-2 text-info"></i>Set Flow Rate</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="setpointDeviceId">
+        <label class="form-label" id="setpointDeviceName">Device</label>
+        <div class="input-group mb-2">
+          <input type="number" class="form-control ec-input" id="setpointValue"
+                 step="0.01" min="0" placeholder="0.00">
+          <span class="input-group-text ec-input-addon">SLPM</span>
+        </div>
+        <input type="range" class="form-range ec-range" id="setpointSlider" min="0" max="100" step="0.1"
+               oninput="document.getElementById('setpointValue').value = parseFloat(this.value).toFixed(2)">
+        <div class="d-flex justify-content-between text-muted small">
+          <span>0</span>
+          <span id="setpointMax">—</span>
+        </div>
+        <div id="setpointError" class="alert alert-danger py-1 small d-none mt-2"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-info text-dark" onclick="app.applySetpoint()">
+          <i class="fa fa-check me-1"></i>Apply
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Gas Selection Modal -->
+<div class="modal fade" id="gasModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-sm">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-flask me-2 text-success"></i>Select Gas</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="gasDeviceId">
+        <div class="mb-2">
+          <label class="form-label">Gas (Alicat Gas #)</label>
+          <select class="form-select ec-input" id="gasSelect">
+            <option value="0">0 — Air</option>
+            <option value="1">1 — Ar (Argon)</option>
+            <option value="2">2 — CH4 (Methane)</option>
+            <option value="3">3 — CO</option>
+            <option value="4">4 — CO2</option>
+            <option value="5">5 — C2H6 (Ethane)</option>
+            <option value="6">6 — H2 (Hydrogen)</option>
+            <option value="7">7 — He (Helium)</option>
+            <option value="8">8 — N2 (Nitrogen)</option>
+            <option value="9">9 — N2O</option>
+            <option value="10">10 — Ne (Neon)</option>
+            <option value="11">11 — O2 (Oxygen)</option>
+            <option value="12">12 — C3H8 (Propane)</option>
+            <option value="13">13 — nC4H10 (n-Butane)</option>
+            <option value="14">14 — C2H2 (Acetylene)</option>
+            <option value="15">15 — C2H4 (Ethylene)</option>
+            <option value="16">16 — iC4H10 (Iso-butane)</option>
+            <option value="17">17 — Kr (Krypton)</option>
+            <option value="18">18 — Xe (Xenon)</option>
+            <option value="19">19 — SF6</option>
+            <option value="20">20 — C-25</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label">Or enter custom gas #</label>
+          <input type="number" class="form-control ec-input" id="gasCustom" min="0" max="255" placeholder="—">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-success" onclick="app.applyGas()">
+          <i class="fa fa-check me-1"></i>Set Gas
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Schedule Modal -->
+<div class="modal fade" id="scheduleModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-calendar-days me-2 text-purple"></i>Load Schedule</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="scheduleDeviceId">
+        <p class="text-muted small">
+          Upload a CSV with columns <code>time</code> (seconds or ISO8601) and a flow rate column
+          (header containing "rate", "lpm", or "slpm").
+        </p>
+        <div class="mb-3">
+          <label class="form-label">CSV File</label>
+          <input type="file" class="form-control ec-input" id="scheduleFile" accept=".csv,.txt">
+        </div>
+        <div id="schedulePreview" class="d-none">
+          <div class="d-flex justify-content-between mb-1">
+            <span class="small text-success"><i class="fa fa-check me-1"></i>Parsed successfully</span>
+            <span class="small text-muted" id="scheduleStepCount">— steps</span>
+          </div>
+          <div class="schedule-preview-table" id="schedulePreviewTable"></div>
+        </div>
+        <div id="scheduleError" class="alert alert-danger py-2 small d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="loadScheduleBtn" onclick="app.loadSchedule()" disabled>
+          <i class="fa fa-upload me-1"></i>Load Schedule
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit Device Modal ───────────────────────────────────────────────────── -->
+<div class="modal fade" id="editDeviceModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-pen me-2 text-accent"></i>Edit Flow Controller</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editDeviceId">
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label">Device Name</label>
+            <input type="text" class="form-control ec-input" id="editDeviceName" placeholder="e.g. MFC-1 Hydrogen">
+          </div>
+          <div class="col-8">
+            <label class="form-label">Host / IP Address</label>
+            <input type="text" class="form-control ec-input" id="editDeviceHost" placeholder="192.168.1.100">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Port</label>
+            <input type="number" class="form-control ec-input" id="editDevicePort" value="502" min="1" max="65535">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Unit ID</label>
+            <input type="number" class="form-control ec-input" id="editDeviceUnit" value="1" min="1" max="247">
+          </div>
+          <div class="col-4">
+            <label class="form-label">Device Type</label>
+            <select class="form-select ec-input" id="editDeviceType">
+              <option value="AUTO">Auto-detect</option>
+              <option value="MCP">MCP / MCR</option>
+              <option value="MC">MC</option>
+            </select>
+          </div>
+          <div class="col-4">
+            <label class="form-label">Max Flow (SLPM) <span class="text-muted small" title="Leave blank to use device-reported max. Set a value to impose a lower limit.">override</span></label>
+            <input type="number" class="form-control ec-input" id="editDeviceMaxFlow" placeholder="Read from device" min="0" step="any">
+            <div class="form-text text-muted" id="editDeviceMaxFlowHint" style="font-size:0.7rem"></div>
+          </div>
+        </div>
+        <div class="mb-2">
+          <div class="d-flex align-items-center justify-content-between mb-1">
+            <label class="form-label mb-0">Location <span class="text-danger small">*</span></label>
+            <button type="button" class="btn btn-xs btn-outline-warning" onclick="app.pickGeoLocation('edit')" title="Click a point on the map">
+              <i class="fa fa-crosshairs me-1"></i>Pick on Map
+            </button>
+          </div>
+          <div class="row g-2">
+            <div class="col-6">
+              <input type="number" class="form-control ec-input" id="editDeviceLat" placeholder="Latitude" step="any">
+            </div>
+            <div class="col-6">
+              <input type="number" class="form-control ec-input" id="editDeviceLon" placeholder="Longitude" step="any">
+            </div>
+          </div>
+          <div class="row g-2 mt-1">
+            <div class="col-6">
+              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Altitude (m ASL)</label>
+              <input type="number" class="form-control ec-input" id="editDeviceAlt" placeholder="Altitude (m)" step="any">
+            </div>
+            <div class="col-6">
+              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Height AGL (m)</label>
+              <input type="number" class="form-control ec-input" id="editDeviceAgl" placeholder="—" step="any">
+              <div class="form-text text-muted" id="editDeviceAglHint" style="font-size:0.68rem;min-height:1em"></div>
+            </div>
+          </div>
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Expected Serial # <span class="text-danger small">*</span></label>
+          <input type="text" class="form-control ec-input" id="editDeviceExpSerial" placeholder="e.g. 123456">
+        </div>
+        <div id="editDeviceError" class="alert alert-danger py-2 small d-none mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="app.saveEditDevice()">
+          <i class="fa fa-save me-1"></i>Save &amp; Reconnect
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit Peripheral Modal ───────────────────────────────────────────────── -->
+<div class="modal fade" id="editPeripheralModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-pen me-2 text-accent"></i>Edit Peripheral</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editPeriphId">
+        <input type="hidden" id="editPeriphType">
+        <div class="mb-3">
+          <label class="form-label">Name</label>
+          <input type="text" class="form-control ec-input" id="editPeriphName" placeholder="e.g. Inlet TC Array">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Hub Serial # <span class="text-muted small">(optional)</span></label>
+          <input type="number" class="form-control ec-input" id="editPeriphSerial" placeholder="Any">
+        </div>
+        <!-- Network -->
+        <div class="mb-2">
+          <label class="form-label">Network Hub Hostname / IP <span class="text-muted small">(leave blank for USB)</span></label>
+          <input type="text" class="form-control ec-input" id="editPeriphServerHost" placeholder="e.g. 192.168.1.50">
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <label class="form-label">Network Server Port</label>
+            <input type="number" class="form-control ec-input" id="editPeriphServerPort" value="5661" min="1" max="65535">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Hub Password <span class="text-muted small">(optional)</span></label>
+            <input type="text" class="form-control ec-input" id="editPeriphServerPass" placeholder="">
+          </div>
+        </div>
+        <!-- VINT Hub Port — required for all types on a multi-device hub -->
+        <div class="mb-3">
+          <label class="form-label">VINT Hub Port <span class="text-muted small">(0–5, leave blank = any)</span></label>
+          <input type="number" class="form-control ec-input" id="editPeriphHubPortCommon" placeholder="Any" min="0" max="5">
+        </div>
+        <!-- Pressure-specific fields (shown only for pressure_vint) -->
+        <div id="editPeriphPressureFields" class="d-none">
+          <div class="mb-2">
+            <label class="form-label">Pressure Unit</label>
+            <input type="text" class="form-control ec-input" id="editPeriphUnits" value="psia">
+          </div>
+          <small class="text-muted d-block mb-1">Calibration: pressure = (voltage_ratio × scale) + offset</small>
+          <div class="row g-1 mb-3">
+            <div class="col-6">
+              <small class="text-muted">Scale</small>
+              <input type="number" class="form-control form-control-sm ec-input" id="editPeriphCalScale" value="1.0" step="0.01">
+            </div>
+            <div class="col-6">
+              <small class="text-muted">Offset</small>
+              <input type="number" class="form-control form-control-sm ec-input" id="editPeriphCalOffset" value="0.0" step="0.01">
+            </div>
+          </div>
+        </div>
+        <!-- Channel labels (count populated by JS based on type) -->
+        <div id="editPeriphLabelsSection">
+          <label class="form-label">Channel Labels</label>
+          <div class="row g-2" id="editPeriphLabelsGrid"><!-- filled by JS --></div>
+        </div>
+        <div id="editPeriphError" class="alert alert-danger py-2 small d-none mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="app.saveEditPeripheral()">
+          <i class="fa fa-rotate-right me-1"></i>Save &amp; Reconnect
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Experiment Editor Modal ─────────────────────────────────────────────── -->
+<div class="modal fade" id="experimentEditorModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-xl">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title" id="expEditorTitle">
+          <i class="fa fa-flask-vial me-2 text-purple"></i>Experiment Editor
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="expEditorId">
+
+        <!-- Metadata -->
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label">Experiment Name <span class="text-danger">*</span></label>
+            <input type="text" class="form-control ec-input" id="expName" placeholder="e.g. Heater Test 3">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Operator</label>
+            <input type="text" class="form-control ec-input" id="expOperator" placeholder="Operator name">
+          </div>
+          <div class="col-12">
+            <label class="form-label">Description / Notes</label>
+            <textarea class="form-control ec-input" id="expNotes" rows="2" placeholder="Test conditions, sample info, or any relevant notes..."></textarea>
+          </div>
+        </div>
+
+        <hr style="border-color:#30363d">
+
+        <!-- Device Schedules -->
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h6 class="mb-0 text-muted text-uppercase" style="font-size:0.78rem;letter-spacing:.05em">
+            <i class="fa fa-wind me-1 text-info"></i>Device Schedules
+          </h6>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" onclick="expUI.showCsvTemplate()"
+                    title="Download or preview the multi-device CSV template">
+              <i class="fa fa-file-lines me-1"></i>CSV Template
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="expUI.importMultiDeviceCSV()"
+                    title="Upload one CSV with columns: Emission ID, Time (UTC), Flow (SLPM)">
+              <i class="fa fa-file-csv me-1"></i>Import Multi-Device CSV
+            </button>
+            <button class="btn btn-sm btn-outline-info" id="addDeviceBtn" onclick="expUI.addDeviceScheduleRow()">
+              <i class="fa fa-plus me-1"></i>Add Device
+            </button>
+          </div>
+        </div>
+        <input type="file" class="d-none" id="multiDeviceCsvFile" accept=".csv"
+               onchange="expUI.handleMultiDeviceCSVFile(this)">
+        <!-- Inline device picker (shown when Add Device is clicked) -->
+        <div id="addDevicePicker" class="d-none mb-2 p-2" style="background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <label class="form-label small mb-1">Select or type a device name:</label>
+          <div class="d-flex gap-2">
+            <input type="text" class="form-control form-control-sm ec-input" id="addDeviceInput"
+                   list="deviceNameDatalist" placeholder="Choose from list or type name..."
+                   onkeydown="if(event.key==='Enter'){expUI.confirmAddDevice();}if(event.key==='Escape'){expUI.cancelAddDevice();}">
+            <datalist id="deviceNameDatalist"></datalist>
+            <button class="btn btn-sm btn-outline-info" onclick="expUI.confirmAddDevice()">Add</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="expUI.cancelAddDevice()">Cancel</button>
+          </div>
+        </div>
+        <div class="text-muted small text-center py-2" id="noExpDevices">
+          No device schedules assigned. Click <strong>Add Device</strong> to begin.
+        </div>
+        <div id="expDeviceSchedules"></div>
+
+        <div id="expEditorError" class="alert alert-danger py-2 small d-none mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-outline-info me-auto" onclick="expUI.exportExperimentJson()" id="expExportBtn" style="display:none!important" disabled>
+          <i class="fa fa-download me-1"></i>Export JSON
+        </button>
+        <button type="button" class="btn btn-purple" onclick="expUI.saveExperiment()">
+          <i class="fa fa-save me-1"></i>Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CSV Timestamp Shift Modal ──────────────────────────────────────────── -->
+<div class="modal fade" id="csvShiftModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="fa fa-clock-rotate-left me-2 text-warning"></i>Shift Schedule Timestamps
+        </h5>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning py-2 small mb-3" id="csvShiftOriginalInfo"></div>
+        <p class="text-muted small mb-3">
+          Enter a new start time to shift all schedule entries so the first event occurs at
+          that moment. Inter-device timing offsets are preserved.
+        </p>
+        <label class="form-label small">New Experiment Start Time</label>
+        <input type="datetime-local" class="form-control ec-input" id="csvShiftNewStart"
+               oninput="expUI.updateCsvShiftPreview()">
+        <div class="text-muted mt-1" style="font-size:0.75rem" id="csvShiftPreview"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="expUI.applyCsvNoShift()">
+          Apply As-Is
+        </button>
+        <button type="button" class="btn btn-warning" onclick="expUI.applyCsvWithShift()">
+          <i class="fa fa-arrows-left-right me-1"></i>Shift &amp; Apply
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Experiment Checklist Item Modal ──────────────────────────────────────── -->
+<div class="modal fade" id="checklistItemModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title" id="checklistItemModalTitle">
+          <i class="fa fa-toggle-on me-2 text-warning"></i>Checklist Item
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="checklistItemIndex" value="-1">
+        <div class="mb-3">
+          <label class="form-label small">Peripheral Name</label>
+          <input type="text" class="form-control ec-input" id="clItemPeriphName" placeholder="e.g. Valve Board">
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-4">
+            <label class="form-label small">Channel</label>
+            <input type="number" class="form-control ec-input" id="clItemChannel" min="0" max="3" value="0">
+          </div>
+          <div class="col-8">
+            <label class="form-label small">Label</label>
+            <input type="text" class="form-control ec-input" id="clItemLabel" placeholder="e.g. N2 Supply">
+          </div>
+        </div>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small">Before Run</label>
+            <select class="form-select ec-input" id="clItemPreState">
+              <option value="">Any (not checked)</option>
+              <option value="true">OPEN</option>
+              <option value="false">CLOSED</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label small">After Run</label>
+            <select class="form-select ec-input" id="clItemPostState">
+              <option value="">Any (not checked)</option>
+              <option value="true">OPEN</option>
+              <option value="false">CLOSED</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning" onclick="app.saveChecklistItem()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CSV Template Modal ─────────────────────────────────────────────────── -->
+<div class="modal fade" id="csvTemplateModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="fa fa-file-lines me-2 text-info"></i>Multi-Device CSV Template
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">
+          The CSV must have exactly three columns. Each row sets the flow rate for a specific device
+          at a specific time — the controller interpolates linearly between rows.
+          Timestamps must be ISO-8601 UTC (e.g. <code>2026-03-11T08:00:00Z</code>).
+        </p>
+
+        <!-- Column descriptions -->
+        <div class="row g-2 mb-3">
+          <div class="col-md-4">
+            <div class="p-2 rounded" style="background:#0d1117;border:1px solid #30363d">
+              <div class="fw-bold text-info small mb-1">Emission ID</div>
+              <div class="text-muted" style="font-size:0.78rem">
+                Device identifier — must match the device name configured in the controller
+                (e.g. <code>MR-01</code>).
+              </div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="p-2 rounded" style="background:#0d1117;border:1px solid #30363d">
+              <div class="fw-bold text-info small mb-1">Time (UTC)</div>
+              <div class="text-muted" style="font-size:0.78rem">
+                ISO-8601 timestamp in UTC. Rows for the same device must be in chronological
+                order.
+              </div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="p-2 rounded" style="background:#0d1117;border:1px solid #30363d">
+              <div class="fw-bold text-info small mb-1">Flow (SLPM)</div>
+              <div class="text-muted" style="font-size:0.78rem">
+                Target flow rate in standard litres per minute. Must be a non-negative number
+                within the device's range.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Preview table -->
+        <h6 class="text-muted text-uppercase mb-2" style="font-size:0.75rem;letter-spacing:.05em">
+          <i class="fa fa-table me-1"></i>Example Preview
+        </h6>
+        <div style="overflow-x:auto;border:1px solid #30363d;border-radius:6px">
+          <table class="table table-sm mb-0" style="font-size:0.82rem;font-family:monospace;background:#0d1117;color:#e6edf3;border-color:#30363d">
+            <thead style="background:#161b22;color:#e6edf3">
+              <tr>
+                <th class="px-3 py-2" style="color:#58a6ff;border-color:#30363d">Emission ID</th>
+                <th class="px-3 py-2" style="color:#58a6ff;border-color:#30363d">Time (UTC)</th>
+                <th class="px-3 py-2" style="color:#58a6ff;border-color:#30363d">Flow (SLPM)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-01</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T00:00:00Z</td><td class="px-3 py-1" style="border-color:#30363d">0.0</td></tr>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-01</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T01:00:00Z</td><td class="px-3 py-1" style="border-color:#30363d">100.0</td></tr>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-01</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T02:00:00Z</td><td class="px-3 py-1" style="border-color:#30363d">250.0</td></tr>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-01</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T03:00:00Z</td><td class="px-3 py-1" style="border-color:#30363d">0.0</td></tr>
+              <tr style="opacity:.5;border-color:#30363d"><td class="px-3 py-1" colspan="3" style="font-style:italic;color:#8b949e;border-color:#30363d">… additional devices below …</td></tr>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-04</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T00:00:00Z</td><td class="px-3 py-1" style="border-color:#30363d">0.0</td></tr>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-04</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T01:30:00Z</td><td class="px-3 py-1" style="border-color:#30363d">50.0</td></tr>
+              <tr style="border-color:#30363d"><td class="px-3 py-1" style="border-color:#30363d">MR-04</td><td class="px-3 py-1" style="border-color:#30363d">2026-03-11T03:00:00Z</td><td class="px-3 py-1" style="border-color:#30363d">0.0</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Tips -->
+        <ul class="text-muted small mt-3 mb-0 ps-3">
+          <li>Rows from different devices can be interleaved or grouped — the import sorts them automatically.</li>
+          <li>Save the file as UTF-8 CSV (plain <code>.csv</code>, not <code>.xlsx</code>).</li>
+          <li>The first row with flow 0.0 and the last row with flow 0.0 set the ramp start/end.</li>
+        </ul>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-info" onclick="expUI.downloadCsvTemplate()">
+          <i class="fa fa-download me-1"></i>Download Template
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Pre-Run Checklist Modal ────────────────────────────────────────────── -->
+<div class="modal fade" id="preRunModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="fa fa-clipboard-check me-2 text-info"></i>Pre-Run Checklist
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="preRunExpId">
+        <h6 class="text-muted mb-2" style="font-size:0.78rem;text-transform:uppercase">Device Connectivity</h6>
+        <div id="preRunDeviceChecks" class="mb-3"></div>
+
+        <h6 class="text-muted mb-2" style="font-size:0.78rem;text-transform:uppercase">Relay / Device States</h6>
+        <p class="text-muted small">Relay states have been automatically applied per the checklist. Verify the current states below.</p>
+        <div id="preRunRelayStates" class="mb-3"></div>
+
+        <!-- Warnings -->
+        <div id="preRunWarnings" class="d-none">
+          <h6 class="text-warning mb-2" style="font-size:0.78rem;text-transform:uppercase">
+            <i class="fa fa-triangle-exclamation me-1"></i>Warnings
+          </h6>
+          <div id="preRunWarningList" class="mb-2"></div>
+        </div>
+
+        <!-- Operator confirmation -->
+        <div class="mt-3 p-3" style="background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="preRunConfirmRelays">
+            <label class="form-check-label" for="preRunConfirmRelays">
+              I confirm the relay/device states shown above are correct.
+            </label>
+          </div>
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="preRunConfirmReady">
+            <label class="form-check-label" for="preRunConfirmReady">
+              All systems are ready to begin the experiment.
+            </label>
+          </div>
+          <div class="mt-2">
+            <label class="form-label small">Operator Sign-Off (name)</label>
+            <input type="text" class="form-control ec-input" id="preRunOperator" placeholder="Your name">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-success" id="preRunStartBtn"
+                onclick="expUI.confirmStart()" disabled>
+          <i class="fa fa-play me-1"></i>Start Experiment
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Data Browser Modal ─────────────────────────────────────────────────── -->
+<div class="modal fade" id="dataBrowserModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-xl">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="fa fa-database me-2 text-info"></i>Data Files
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+        <div class="d-flex justify-content-end mb-2">
+          <button class="btn btn-sm btn-outline-secondary" onclick="expUI.refreshDataBrowser()">
+            <i class="fa fa-refresh me-1"></i>Refresh
+          </button>
+        </div>
+        <div id="dataBrowserContent">
+          <div class="text-muted text-center py-4">
+            <i class="fa fa-spinner fa-spin me-2"></i>Loading…
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Import Experiment Modal ────────────────────────────────────────────── -->
+<div class="modal fade" id="importExperimentModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-file-import me-2"></i>Import Experiment</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small">Upload a previously exported experiment JSON file.</p>
+        <input type="file" class="form-control ec-input" id="importExpFile" accept=".json">
+        <div id="importExpError" class="alert alert-danger py-2 small d-none mt-2"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="expUI.doImportExperiment()">
+          <i class="fa fa-upload me-1"></i>Import
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+<!-- ── Sessions & Chat Modal ────────────────────────────────────────────────── -->
+<div class="modal fade" id="sessionsModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered" style="max-width:480px">
+    <div class="modal-content ec-modal">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0">
+          <i class="fa fa-users me-2 text-success"></i>
+          <span id="sessionsModalTitle">Connected Sessions</span>
+        </h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+
+        <!-- Session list -->
+        <div class="p-3 pb-2">
+          <div id="sessionModalList" class="session-modal-list"></div>
+        </div>
+
+        <!-- Chat section -->
+        <div class="chat-section">
+          <div class="chat-header d-flex justify-content-between align-items-center">
+            <span><i class="fa fa-comments me-1 text-info"></i><span class="small fw-semibold">Session Chat</span></span>
+            <button class="btn btn-xs btn-outline-danger" title="Clear chat log" onclick="app.clearChat()">
+              <i class="fa fa-trash-can"></i> Clear
+            </button>
+          </div>
+          <div id="chatMessages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <input type="text" class="form-control form-control-sm ec-input" id="chatInput"
+                   placeholder="Type a message…" maxlength="500" autocomplete="off"
+                   onkeydown="if(event.key==='Enter')app.sendChat()">
+            <button class="btn btn-sm btn-info" onclick="app.sendChat()" title="Send">
+              <i class="fa fa-paper-plane"></i>
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Map Overlay Manager Modal ────────────────────────────────────────────── -->
+<div class="modal fade" id="overlayManagerModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-image me-2 text-info"></i>Custom Map Overlays</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">
+          Upload a custom image (floor plan, aerial photo, site map) and specify the GPS coordinates
+          of its <strong>top-left</strong> and <strong>bottom-right</strong> corners to align it on the map.
+        </p>
+        <div id="overlayList" class="mb-3"></div>
+
+        <!-- Edit existing overlay (shown when an edit button is clicked) -->
+        <div id="overlayEditSection" class="d-none mb-3 p-3"
+             style="background:#0d1117;border:1px solid #f0883e;border-radius:8px">
+          <h6 class="text-warning mb-2" style="font-size:0.8rem">
+            <i class="fa fa-pen me-1"></i>Edit Overlay
+          </h6>
+          <div class="row g-2 mb-2">
+            <div class="col-6">
+              <label class="form-label small">Label</label>
+              <input type="text" class="form-control form-control-sm ec-input" id="editOverlayLabel">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Opacity</label>
+              <input type="number" class="form-control form-control-sm ec-input" id="editOverlayOpacity"
+                     min="0.1" max="1" step="0.05">
+            </div>
+          </div>
+          <div class="row g-2 mb-2">
+            <div class="col-3">
+              <label class="form-label small">Top-Left Lat</label>
+              <input type="number" class="form-control form-control-sm ec-input" id="editOverlayNLat" step="any">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Top-Left Lon</label>
+              <input type="number" class="form-control form-control-sm ec-input" id="editOverlayWLon" step="any">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Bottom-Right Lat</label>
+              <input type="number" class="form-control form-control-sm ec-input" id="editOverlaySLat" step="any">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Bottom-Right Lon</label>
+              <input type="number" class="form-control form-control-sm ec-input" id="editOverlayELon" step="any">
+            </div>
+          </div>
+          <div id="overlayEditError" class="alert alert-danger py-2 small d-none"></div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-warning" onclick="ecMap.saveEditOverlay()">
+              <i class="fa fa-save me-1"></i>Save Changes
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="ecMap.cancelEditOverlay()">Cancel</button>
+          </div>
+        </div>
+
+        <hr style="border-color:#30363d">
+        <h6 class="text-muted text-uppercase mb-2" style="font-size:0.78rem">Add New Overlay</h6>
+        <div class="row g-2 mb-2">
+          <div class="col-12">
+            <label class="form-label small">Image File</label>
+            <input type="file" class="form-control form-control-sm ec-input" id="overlayFileInput"
+                   accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff">
+          </div>
+          <div class="col-6">
+            <label class="form-label small">Label</label>
+            <input type="text" class="form-control form-control-sm ec-input" id="overlayLabel"
+                   placeholder="e.g. Site Plan">
+          </div>
+          <div class="col-3">
+            <label class="form-label small">Opacity</label>
+            <input type="number" class="form-control form-control-sm ec-input" id="overlayOpacity"
+                   value="0.7" min="0.1" max="1" step="0.05">
+          </div>
+        </div>
+        <div class="row g-2 mb-2">
+          <div class="col-3">
+            <label class="form-label small">Top-Left Lat</label>
+            <input type="number" class="form-control form-control-sm ec-input" id="overlayNLat" step="any" placeholder="40.5860">
+          </div>
+          <div class="col-3">
+            <label class="form-label small">Top-Left Lon</label>
+            <input type="number" class="form-control form-control-sm ec-input" id="overlayWLon" step="any" placeholder="-105.085">
+          </div>
+          <div class="col-3">
+            <label class="form-label small">Bottom-Right Lat</label>
+            <input type="number" class="form-control form-control-sm ec-input" id="overlaySLat" step="any" placeholder="40.5840">
+          </div>
+          <div class="col-3">
+            <label class="form-label small">Bottom-Right Lon</label>
+            <input type="number" class="form-control form-control-sm ec-input" id="overlayELon" step="any" placeholder="-105.083">
+          </div>
+        </div>
+        <div id="overlayAddError" class="alert alert-danger py-2 small d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-info" onclick="ecMap.addOverlay()">
+          <i class="fa fa-upload me-1"></i>Upload &amp; Add
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Tile Cache Modal ───────────────────────────────────────────────────── -->
+<div class="modal fade" id="tileCacheModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal-content">
+      <div class="modal-header ec-modal-header">
+        <h5 class="modal-title"><i class="fa fa-download me-2 text-warning"></i>Cache Map Tiles for Offline Use</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted mb-3">
+          Downloads Esri Imagery Hybrid tiles (satellite + labels) for the
+          <strong>current map view</strong> at the selected zoom levels and saves them
+          to disk. Once cached, the map works without an internet connection.
+        </p>
+
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <label class="form-label small mb-1">Min zoom level</label>
+            <input type="number" id="tileZoomMin" class="form-control form-control-sm ec-input"
+                   min="1" max="20" value="11">
+            <div class="form-text" style="font-size:0.7rem">Lower = wider area overview</div>
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-1">Max zoom level</label>
+            <input type="number" id="tileZoomMax" class="form-control form-control-sm ec-input"
+                   min="1" max="20" value="19">
+            <div class="form-text" style="font-size:0.7rem">Higher = more detail, more tiles</div>
+          </div>
+        </div>
+
+        <div class="d-flex gap-2 mb-2">
+          <button class="btn btn-sm btn-outline-info" id="tileCacheEstimateBtn"
+                  onclick="ecMap.estimateTiles()">
+            <i class="fa fa-calculator me-1"></i>Estimate
+          </button>
+          <button class="btn btn-sm btn-warning" id="tileCacheDownloadBtn"
+                  onclick="ecMap.startTileDownload()" disabled>
+            <i class="fa fa-download me-1"></i>Download for Current View
+          </button>
+        </div>
+        <div id="tileCacheEstimate" class="small text-info mb-3"></div>
+
+        <div id="tileCacheProgressWrap" class="d-none mb-3">
+          <div class="progress mb-1" style="height:18px">
+            <div id="tileCacheProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-warning"
+                 style="width:0%" role="progressbar">0%</div>
+          </div>
+          <div id="tileCacheProgressLabel" class="small text-muted"></div>
+        </div>
+
+        <hr class="border-secondary my-3">
+        <div class="d-flex justify-content-between align-items-center">
+          <div id="tileCacheStatus" class="text-muted small">No tiles cached</div>
+          <button class="btn btn-sm btn-outline-danger" onclick="ecMap.clearTileCache()">
+            <i class="fa fa-trash me-1"></i>Clear Cache
+          </button>
+        </div>
+      </div>
+      <div class="modal-footer ec-modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Scripts ──────────────────────────────────────────────────────────────── -->
+<script src="/static/vendor/js/bootstrap.bundle.min.js"></script>
+<script src="/static/vendor/js/Sortable.min.js"></script>
+<script src="/static/vendor/js/chart.umd.min.js"></script>
+<script src="/static/vendor/js/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="/static/vendor/js/socket.io.min.js"></script>
+<script src="/static/vendor/js/leaflet.js"></script>
+<script src="/static/js/plots.js"></script>
+<script src="/static/js/app.js"></script>
+<script src="/static/js/map.js"></script>
+<script src="/static/js/review.js"></script>
+<script src="/static/js/expviewer.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "center_lat": 40.595286949293516,
+  "center_lon": -105.1402598619461,
+  "overlays": [
+    {
+      "elon": -105.1383823156357,
+      "filename": "92d6e31c_site_overlay.jpg",
+      "id": "ov_1773108794889",
+      "label": "92d6e31c_site_overlay.jpg",
+      "nlat": 40.59659447731336,
+      "opacity": 0.8,
+      "slat": 40.59346614337934,
+      "url": "/static/map_uploads/92d6e31c_site_overlay.jpg",
+      "wlon": -105.1425290107727
+    }
+  ],
+  "zoom": 18
+}

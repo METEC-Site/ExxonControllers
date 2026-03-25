@@ -1,0 +1,146 @@
+{
+  "experiment_id": "exp_20260319T191453Z_148847",
+  "name": "2 Minute Experiment",
+  "description": "",
+  "operator": "Bryan",
+  "location": "",
+  "notes": "",
+  "created_at": "2026-03-19T19:14:53.964314+00:00",
+  "started_at": "2026-03-25T19:45:39.792800+00:00",
+  "completed_at": "2026-03-25T19:48:08.940695+00:00",
+  "status": "completed",
+  "device_schedules": {
+    "MR-01": {
+      "device_name": "MR-01",
+      "schedule": [
+        {
+          "setpoint": 0,
+          "time": 28.405
+        },
+        {
+          "setpoint": 3,
+          "time": 43.405
+        },
+        {
+          "setpoint": 7,
+          "time": 73.405
+        },
+        {
+          "setpoint": 2,
+          "time": 103.405
+        },
+        {
+          "setpoint": 0,
+          "time": 133.405
+        }
+      ]
+    },
+    "MR-02": {
+      "device_name": "MR-02",
+      "schedule": [
+        {
+          "setpoint": 0,
+          "time": 28.405
+        },
+        {
+          "setpoint": 2,
+          "time": 43.405
+        },
+        {
+          "setpoint": 6,
+          "time": 88.405
+        },
+        {
+          "setpoint": 0,
+          "time": 118.405
+        }
+      ]
+    },
+    "MR-03": {
+      "device_name": "MR-03",
+      "schedule": [
+        {
+          "setpoint": 0,
+          "time": 28.405
+        },
+        {
+          "setpoint": 4,
+          "time": 58.405
+        },
+        {
+          "setpoint": 8,
+          "time": 103.405
+        },
+        {
+          "setpoint": 0,
+          "time": 133.405
+        }
+      ]
+    },
+    "MR-04": {
+      "device_name": "MR-04",
+      "schedule": [
+        {
+          "setpoint": 0,
+          "time": 28.405
+        },
+        {
+          "setpoint": 1,
+          "time": 58.405
+        },
+        {
+          "setpoint": 4,
+          "time": 103.405
+        },
+        {
+          "setpoint": 0,
+          "time": 133.405
+        }
+      ]
+    },
+    "MR-05": {
+      "device_name": "MR-05",
+      "schedule": [
+        {
+          "setpoint": 0,
+          "time": 28.405
+        },
+        {
+          "setpoint": 5,
+          "time": 73.405
+        },
+        {
+          "setpoint": 9,
+          "time": 118.405
+        },
+        {
+          "setpoint": 0,
+          "time": 148.405
+        }
+      ]
+    },
+    "MR-06": {
+      "device_name": "MR-06",
+      "schedule": [
+        {
+          "setpoint": 0,
+          "time": 28.405
+        },
+        {
+          "setpoint": 3,
+          "time": 88.405
+        },
+        {
+          "setpoint": 6,
+          "time": 118.405
+        },
+        {
+          "setpoint": 0,
+          "time": 148.405
+        }
+      ]
+    }
+  },
+  "relay_checklist": [],
+  "global_start_iso": "2026-03-25T19:45:31.595Z"
+}

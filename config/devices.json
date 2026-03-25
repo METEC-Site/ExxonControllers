@@ -1,0 +1,202 @@
+{
+  "alicat": {
+    "a1e3d8f3": {
+      "host": "192.168.109.2",
+      "port": 502,
+      "unit_id": 1,
+      "device_type": "MCP",
+      "device_name": "MR-01",
+      "max_flow": 1000.0,
+      "lat": 40.595952,
+      "lon": -105.141926,
+      "alt": 1568.0,
+      "expected_serial": "525213",
+      "serial_number": "525213",
+      "gas_number": 189,
+      "disabled": false
+    },
+    "16beaf00": {
+      "host": "192.168.109.3",
+      "port": 502,
+      "unit_id": 1,
+      "device_type": "MCP",
+      "device_name": "MR-02",
+      "max_flow": 250.0,
+      "lat": 40.595773,
+      "lon": -105.141234,
+      "alt": null,
+      "expected_serial": "525214",
+      "serial_number": "525214",
+      "gas_number": 189,
+      "disabled": false
+    },
+    "41edf033": {
+      "host": "192.168.109.4",
+      "port": 502,
+      "unit_id": 1,
+      "device_type": "MC",
+      "device_name": "MR-03",
+      "max_flow": 50.0,
+      "lat": 40.595529,
+      "lon": -105.141084,
+      "alt": 1566.0,
+      "expected_serial": "525215",
+      "serial_number": "525215",
+      "gas_number": 189,
+      "disabled": false
+    },
+    "c8f52b76": {
+      "host": "192.168.109.5",
+      "port": 502,
+      "unit_id": 1,
+      "device_type": "MC",
+      "device_name": "MR-04",
+      "max_flow": 1300.0,
+      "lat": 40.595362,
+      "lon": -105.14154,
+      "alt": null,
+      "expected_serial": "123456",
+      "serial_number": null,
+      "gas_number": 189,
+      "disabled": false
+    },
+    "c44ea809": {
+      "host": "192.168.109.6",
+      "port": 502,
+      "unit_id": 1,
+      "device_type": "MC",
+      "device_name": "MR-05",
+      "max_flow": 250.0,
+      "lat": 40.595423,
+      "lon": -105.139738,
+      "alt": 1566.0,
+      "expected_serial": "123457",
+      "serial_number": null,
+      "gas_number": 189,
+      "disabled": false
+    },
+    "1e530b65": {
+      "host": "192.168.109.7",
+      "port": 502,
+      "unit_id": 1,
+      "device_type": "MC",
+      "device_name": "MR-06",
+      "max_flow": 250.0,
+      "lat": 40.595346,
+      "lon": -105.141256,
+      "alt": 1566.0,
+      "expected_serial": "123458",
+      "serial_number": null,
+      "gas_number": 189,
+      "disabled": false
+    }
+  },
+  "peripherals": {
+    "317cf6f6": {
+      "peripheral_id": "317cf6f6",
+      "name": "Inlet",
+      "type": "pressure_vint",
+      "hub_serial": null,
+      "hub_port": 3,
+      "calibration": [
+        1.0,
+        0.0
+      ],
+      "units": "psia",
+      "server_hostname": "192.168.109.1",
+      "server_port": 5661,
+      "server_password": "CH4@csufts",
+      "channel_labels": [
+        "Pressure"
+      ],
+      "disabled": false
+    },
+    "0528a8a5": {
+      "peripheral_id": "0528a8a5",
+      "name": "SSR",
+      "type": "relay",
+      "hub_serial": null,
+      "hub_port": 0,
+      "channel_offset": 0,
+      "server_hostname": "192.168.109.1",
+      "server_port": 5661,
+      "server_password": "CH4@csufts",
+      "channel_labels": [
+        "Inlet Solenoid",
+        "Relay 1",
+        "Relay 2",
+        "Relay 3"
+      ],
+      "disabled": false
+    },
+    "924e1657": {
+      "peripheral_id": "924e1657",
+      "name": "Heaters",
+      "type": "relay_mechanical",
+      "hub_serial": null,
+      "hub_port": 4,
+      "channel_offset": 0,
+      "server_hostname": "192.168.109.1",
+      "server_port": 5661,
+      "server_password": "CH4@csufts",
+      "channel_labels": [
+        "Heater 1",
+        "Heater 2",
+        "Relay 2",
+        "Relay 3"
+      ],
+      "disabled": false
+    },
+    "b6a75417": {
+      "peripheral_id": "b6a75417",
+      "name": "TC Board 1",
+      "type": "thermocouple",
+      "hub_serial": null,
+      "hub_port": 1,
+      "channel_offset": 0,
+      "server_hostname": "192.168.109.1",
+      "server_port": 5661,
+      "server_password": "CH4@csufts",
+      "channel_labels": [
+        "CH0(Test)",
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "disabled": false
+    },
+    "d4dae261": {
+      "peripheral_id": "d4dae261",
+      "name": "TC Board 2",
+      "type": "thermocouple",
+      "hub_serial": null,
+      "hub_port": 2,
+      "channel_offset": 0,
+      "server_hostname": "192.168.109.1",
+      "server_port": 5661,
+      "server_password": "CH4@csufts",
+      "channel_labels": [
+        "CH0",
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "disabled": false
+    }
+  },
+  "alicat_order": [
+    "a1e3d8f3",
+    "16beaf00",
+    "41edf033",
+    "c8f52b76",
+    "c44ea809",
+    "1e530b65"
+  ],
+  "peripheral_order": [
+    "317cf6f6",
+    "0528a8a5",
+    "924e1657",
+    "b6a75417",
+    "d4dae261"
+  ]
+}

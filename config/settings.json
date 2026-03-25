@@ -1,0 +1,12 @@
+{
+  "password_hash": "95cb7654727cc3cd069b5874ba03e284103a9289789e52da22f29b5ae9b736ba",
+  "password_salt": "95eacfc29ee633ea7cf10ddc68f73980",
+  "secret_key": "c03fecb575231015c9556c6f65df726878d96313126fb87a47da865ce18c9959",
+  "poll_interval_ms": 1000,
+  "history_length": 3600,
+  "heartbeat_interval_s": 5,
+  "nas": {
+    "path": "\\\\metec-nas.research.colostate.edu\\METEC2\\ExxonProject",
+    "enabled": true
+  }
+}

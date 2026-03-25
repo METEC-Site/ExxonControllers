@@ -1,0 +1,9 @@
+[
+  {
+    "channel": 0,
+    "label": "Inlet Solenoid",
+    "peripheral_name": "SSR",
+    "post_state": false,
+    "pre_state": true
+  }
+]
