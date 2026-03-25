@@ -7,7 +7,7 @@ and Phidget peripherals, with synchronized multi-client UI.
 Run:
     pip install -r requirements.txt
     python app.py
-Then open http://<host>:5000 in a browser.
+Then open http://<host>:52424 in a browser.
 Default credentials: password = "admin"  (change via Settings in the UI)
 """
 
@@ -1736,4 +1736,4 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT,  _graceful_shutdown)
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    socketio.run(app, host='0.0.0.0', port=52424, debug=False)
