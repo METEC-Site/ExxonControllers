@@ -1646,7 +1646,7 @@ if __name__ == '__main__':
     # Start background polling (use socketio helper so gevent schedules it properly)
     socketio.start_background_task(_polling_loop)
 
-    print(f"  Server: http://0.0.0.0:5000")
+    print(f"  Server: http://0.0.0.0:52424")
     print(f"  Default password: admin  (change in Settings)")
     print("=" * 60)
 
