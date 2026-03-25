@@ -5,6 +5,11 @@
 Data/
 backups/
 
+# Runtime-generated config files (ephemeral, machine-specific)
+config/heartbeat.json
+config/heartbeat.json.tmp
+config/chat_log.json
+
 # Testing and notes
 Testing/
 Notes/
