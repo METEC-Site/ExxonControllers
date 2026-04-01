@@ -355,6 +355,21 @@ class ExperimentManager:
         started_device_ids = []
         devices_info = {}
 
+        # If the experiment has an absolute start time in the future, offset all
+        # schedule times so setpoints fire at the correct wall-clock moment.
+        delay_s = 0.0
+        global_start_iso = exp.get('global_start_iso')
+        if global_start_iso:
+            try:
+                global_start = datetime.fromisoformat(global_start_iso)
+                if global_start.tzinfo is None:
+                    global_start = global_start.replace(tzinfo=timezone.utc)
+                diff = (global_start - datetime.now(timezone.utc)).total_seconds()
+                if diff > 0:
+                    delay_s = diff
+            except Exception:
+                pass  # malformed iso — ignore, start immediately
+
         for device_name, sched_info in exp['device_schedules'].items():
             device_id = self._find_device_id_by_name(device_mgr, device_name)
             if not device_id:
@@ -374,6 +389,10 @@ class ExperimentManager:
             # Load and start the schedule (load_schedule normalises setpoint→rate).
             schedule = sched_info.get('schedule', [])
             if schedule:
+                if delay_s > 0:
+                    schedule = [
+                        {**s, 'time': s['time'] + delay_s} for s in schedule
+                    ]
                 device_mgr.load_schedule(device_id, schedule)
                 device_mgr.start_schedule(device_id)
 

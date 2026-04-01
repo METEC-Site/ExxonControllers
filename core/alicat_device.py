@@ -253,12 +253,13 @@ class AlicatDevice:
                         pass
                     self._client = None
                 # Connect timeout (2 s) is generous for initial TCP handshake;
-                # read/write timeout (0.75 s) is tight because a healthy device
+                # read/write timeout (0.25 s) is tight because a healthy device
                 # on a local network responds in < 50 ms.  Keeping reads fast
                 # prevents a single unresponsive device from blocking the 1 Hz
-                # poll cycle for the full 2 s that would trigger SLOW warnings.
+                # poll cycle.  Five consecutive failures (≈5 s) are required
+                # before the device is marked disconnected.
                 self._client = _ModbusTCPClient(self.host, port=self.port,
-                                                timeout=0.75, connect_timeout=2.0)
+                                                timeout=0.25, connect_timeout=2.0)
                 result = self._client.connect()
                 self.connected = result
                 if result:
@@ -482,11 +483,11 @@ class AlicatDevice:
             if not block or len(block) < 12:
                 return None
             return {
-                'pressure':    self._float32_from_registers(block[2], block[3]),
-                'temperature': self._float32_from_registers(block[4], block[5]),
-                'vol_flow':    self._float32_from_registers(block[6], block[7]),
-                'mass_flow':   self._float32_from_registers(block[8], block[9]),
-                'setpoint':    self._float32_from_registers(block[10], block[11]),
+                'pressure':    round(self._float32_from_registers(block[2], block[3]), 3),
+                'temperature': round(self._float32_from_registers(block[4], block[5]), 2),
+                'vol_flow':    round(self._float32_from_registers(block[6], block[7]), 3),
+                'mass_flow':   round(self._float32_from_registers(block[8], block[9]), 3),
+                'setpoint':    round(self._float32_from_registers(block[10], block[11]), 2),
             }
 
     def read_process_values(self):
@@ -501,7 +502,7 @@ class AlicatDevice:
                 values = self._read_process_values_locked()
                 if values is None:
                     self.fail_count += 1
-                    if self.fail_count >= 2:
+                    if self.fail_count >= 5:
                         self.connected = False
                         print(f"[AlicatDevice] {self.device_name} marked disconnected "
                               f"after {self.fail_count} failures")
@@ -513,7 +514,7 @@ class AlicatDevice:
                 return values
             except Exception:
                 self.fail_count += 1
-                if self.fail_count >= 2:
+                if self.fail_count >= 5:
                     self.connected = False
                 return None
 

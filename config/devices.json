@@ -4,7 +4,7 @@
       "host": "192.168.109.2",
       "port": 502,
       "unit_id": 1,
-      "device_type": "MCP",
+      "device_type": "MC",
       "device_name": "MR-01",
       "max_flow": 1000.0,
       "lat": 40.595952,
@@ -41,7 +41,7 @@
       "lon": -105.141084,
       "alt": 1566.0,
       "expected_serial": "525215",
-      "serial_number": "525215",
+      "serial_number": null,
       "gas_number": 189,
       "disabled": false
     },

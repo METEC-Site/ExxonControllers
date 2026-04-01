@@ -2935,6 +2935,8 @@ const expUI = (() => {
     const operator = document.getElementById('preRunOperator').value.trim();
     bootstrap.Modal.getInstance(document.getElementById('preRunModal'))?.hide();
     _getSocket().emit('start_experiment', { experiment_id: expId, operator });
+    // Switch to the experiment/review tab so the user sees live progress
+    if (typeof switchMainTab === 'function') switchMainTab('review');
   }
 
   function stopExperiment() {

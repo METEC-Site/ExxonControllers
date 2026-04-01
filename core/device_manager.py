@@ -20,7 +20,7 @@ from dateutil import parser as date_parser
 
 from core.alicat_device import AlicatDevice, DEVICE_CONFIGS
 from core.data_logger import RawDataLogger, ExperimentDataLogger, PeripheralDataLogger
-from core.phidget_manager import create_peripheral, PHIDGET_AVAILABLE_FLAG
+from core.phidget_manager import create_peripheral, PHIDGET_AVAILABLE_FLAG, check_server_health
 
 
 try:
@@ -394,7 +394,7 @@ class DeviceManager:
                 self._last_log_time[did] = 0.0
 
     def stop_device(self, device_id: str) -> dict:
-        """Stop data logging for a device."""
+        """Stop data logging for a device and zero its setpoint."""
         with self._lock:
             logger = self._raw_loggers.pop(device_id, None)
             self._running[device_id] = False
@@ -404,6 +404,15 @@ class DeviceManager:
 
         if logger:
             logger.close()
+
+        # Zero the setpoint so the flow controller stops flowing
+        device = self._alicat.get(device_id)
+        if device and device.connected:
+            try:
+                device.set_flow_rate(0.0)
+            except Exception:
+                pass
+
         return {'success': True}
 
     # ── Experiment ownership ──────────────────────────────────────────────────
@@ -929,6 +938,15 @@ class DeviceManager:
                 if sched and sched.get('running') and sched.get('current_setpoint') is not None:
                     device.set_flow_rate(sched['current_setpoint'])
 
+        # Server-level health check: probe each unique Phidget server endpoint
+        # with a raw TCP connect.  If unreachable, immediately force-disconnect
+        # all peripherals on that server so the poll loop triggers close+open.
+        # This catches silent TCP deaths (e.g. VINT hub power loss) where
+        # on_detach never fires.  Rate-limited internally to once per 3 s per
+        # endpoint and skipped entirely when all peripherals are already
+        # disconnected.
+        check_server_health(self._peripherals)
+
         for peripheral_id, periph in list(self._peripherals.items()):
             pstate = periph.get_state()
 
@@ -966,8 +984,10 @@ class DeviceManager:
 
             # Case 1: open() itself failed — retry every 3s.
             # Case 2: opened=True but Phidget not attached — force close+open after 2s.
-            #   Net.removeServer() is fire-and-forget (non-blocking) so close()
-            #   returns quickly and open() retries the connection immediately.
+            #   ChannelPersistence is disabled, so the Phidget library will not
+            #   re-attach on its own.  The 2s window absorbs momentary glitches
+            #   (e.g. a single missed on_attach) before we force a full
+            #   close+open cycle with a fresh TCP connection.
             need_reopen = False
             reopen_interval = 3.0
             if not opened:
@@ -987,7 +1007,7 @@ class DeviceManager:
                         self._periph_reconnecting.add(peripheral_id)
                         def _try_reopen(p=periph, pid=peripheral_id):
                             try:
-                                p.close()
+                                p.close(for_reconnect=True)
                                 p.open()
                             except BaseException:
                                 pass

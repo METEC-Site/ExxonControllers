@@ -23,38 +23,76 @@ try:
 except (ImportError, OSError):
     PHIDGET_AVAILABLE = False
 
-
-# No global lock around Net.addServer / Net.removeServer.
-# Each peripheral has its own _op_lock that serialises its open() and close()
-# calls, and each uses a unique server_name ("phidget_<id>"), so concurrent
-# Net operations for *different* peripherals target different server names and
-# cannot trigger PhidgetException 0x1b (Duplicate).  A global lock previously
-# serialised ALL peripherals behind a single Net.removeServer() C call that
-# blocks for 30+ seconds when the Phidget server is unreachable, starving the
-# gevent threadpool and killing WebSocket responsiveness.
+# ChannelPersistence is intentionally NOT used.  The Phidget C library's
+# internal persistence layer holds stale TCP state for DigitalOutput channels
+# after network drops and never fires on_attach again.  Our own close+open
+# cycle (driven by the poll loop in device_manager) handles reconnection
+# reliably for all channel types.
 
 
-def _net_add_server(server_name, hostname, port, password):
-    """Register a Phidget network server.
-    Uses a non-blocking remove first (same fire-and-forget approach as
-    _net_remove_server) so this function never blocks on TCP teardown.
-    If the remove hasn't completed by the time addServer runs, the
-    Duplicate error is silently ignored — the existing registration has
-    the same host/port, so reusing it is correct for reconnect scenarios."""
-    _net_remove_server(server_name)   # fire-and-forget; never blocks
+# Per-peripheral server registry — each peripheral gets its own dedicated
+# Net.addServer registration so that close+open on one peripheral triggers a
+# full Net.removeServer / Net.addServer cycle with a fresh TCP connection,
+# without affecting any other peripheral.
+#
+# A *bounded* modular generation counter (mod _SERVER_GEN_MODULUS) is
+# embedded in the server name so consecutive open() calls always get a
+# distinct name, while the total number of unique names per host:port stays
+# small.  With a 3 s reopen interval and modulus 10, a name cannot be reused
+# until 30 s after it was last created — plenty of time for the async
+# removeServer to finish.  This prevents unbounded accumulation of stale
+# server registrations in the Phidget C library during long outages.
+#
+# A C-level lock is used so it is never monkey-patched by gevent.
+
+_server_lock = _cthread.allocate_lock()  # C-level lock
+_server_periph_map: dict[str, object] = {}   # server_name -> peripheral
+_server_events_registered = False
+_server_gen = 0  # modular generation counter
+_SERVER_GEN_MODULUS = 10  # names rotate every 10 generations
+
+
+def _next_server_gen():
+    """Return the next generation number (mod _SERVER_GEN_MODULUS, thread-safe)."""
+    global _server_gen
+    with _server_lock:
+        _server_gen = (_server_gen + 1) % _SERVER_GEN_MODULUS
+        return _server_gen
+
+
+def _server_acquire(hostname, port, password, peripheral=None):
+    """Register a uniquely-named Net server for this peripheral.
+    Returns the server_name which must be passed to _server_release later."""
+    gen = _next_server_gen()
+    server_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
+    _register_server_events_once()
+    with _server_lock:
+        if peripheral is not None:
+            _server_periph_map[server_name] = peripheral
+    # If a stale registration with this name still exists (the async
+    # removeServer from a previous cycle hasn't completed yet), remove it
+    # synchronously *in a daemon thread* before adding the new one.  This
+    # should be rare — it only happens if the modulus wraps before cleanup.
     try:
         Net.addServer(server_name, hostname, port, password, 0)
-    except Exception as e:
-        # Duplicate = remove not yet done but existing entry is fine; ignore.
-        if 'Duplicate' not in str(e):
-            raise
+    except Exception:
+        # Likely "Duplicate" — the previous async remove hasn't finished.
+        # Force-remove then retry once.
+        try:
+            Net.removeServer(server_name)
+        except Exception:
+            pass
+        Net.addServer(server_name, hostname, port, password, 0)
+    return server_name
 
 
-def _net_remove_server(server_name):
-    """Unregister a Phidget network server in a daemon thread so callers never
-    block.  Net.removeServer() can stall for 30+ s waiting for TCP teardown on
-    an unreachable server; running it in the background keeps close() fast so a
-    subsequent open() is called immediately when reconnecting."""
+def _server_release(server_name):
+    """Remove a Net server by name.  Runs asynchronously in a daemon thread
+    so callers never block (Net.removeServer can stall 30+ s on an
+    unreachable server).  Safe because the next open() will use a different
+    server name — no race is possible."""
+    with _server_lock:
+        _server_periph_map.pop(server_name, None)
     def _do_remove():
         try:
             Net.removeServer(server_name)
@@ -62,6 +100,42 @@ def _net_remove_server(server_name):
             pass
     t = threading.Thread(target=_do_remove, daemon=True)
     t.start()
+
+
+def _register_server_events_once():
+    """Register Net server added/removed handlers exactly once."""
+    global _server_events_registered
+    with _server_lock:
+        if _server_events_registered:
+            return
+        _server_events_registered = True
+    try:
+        Net.setOnServerAddedHandler(_on_net_server_added)
+        Net.setOnServerRemovedHandler(_on_net_server_removed)
+    except Exception:
+        pass
+
+
+def _on_net_server_added(server):
+    """Phidget network server appeared.  Channel persistence handles re-attach;
+    no action needed here — on_attach callbacks update _connected flags."""
+    pass
+
+
+def _on_net_server_removed(server):
+    """Phidget network server disappeared.  Immediately invalidate _connected
+    flags for the peripheral on that server so the poll loop detects the
+    disconnect on the next cycle without waiting for on_detach to fire."""
+    server_name = getattr(server, 'name', None)
+    if not server_name:
+        return
+    with _server_lock:
+        periph = _server_periph_map.get(server_name)
+    if periph is not None:
+        try:
+            periph._on_server_removed()
+        except Exception:
+            pass
 
 
 class ThermocouplePeripheral:
@@ -104,7 +178,7 @@ class ThermocouplePeripheral:
         self._op_lock = _cthread.allocate_lock()  # serialises open() / close()
         self.opened = False
         self.error = None
-        self._server_name = f"phidget_{self.peripheral_id}"
+        self._server_name = None  # assigned by _server_acquire
 
     def open(self):
         """Open all thermocouple channels."""
@@ -117,9 +191,8 @@ class ThermocouplePeripheral:
 
             try:
                 if self.server_hostname:
-                    _net_add_server(
-                        self._server_name,
-                        self.server_hostname, self.server_port, self.server_password
+                    self._server_name = _server_acquire(
+                        self.server_hostname, self.server_port, self.server_password, self
                     )
 
                 for i in range(self.NUM_CHANNELS):
@@ -143,12 +216,22 @@ class ThermocouplePeripheral:
                             self._connected[index] = False
                             self._values[index] = None
 
+                    def on_error(c, code, description, index=idx):
+                        # Thermocouple boards fire sensor-level errors (open probe,
+                        # out-of-range, short) that do NOT indicate a channel
+                        # disconnection — the board is still attached.  Clear the
+                        # reading but leave _connected alone; on_detach handles
+                        # actual channel disconnections.
+                        with self._lock:
+                            self._values[index] = None
+
                     def on_temp(c, temp, index=idx):
                         with self._lock:
                             self._values[index] = temp
 
                     ch.setOnAttachHandler(on_attach)
                     ch.setOnDetachHandler(on_detach)
+                    ch.setOnErrorHandler(on_error)
                     ch.setOnTemperatureChangeHandler(on_temp)
                     ch.open()
                     self._channels.append(ch)
@@ -165,7 +248,7 @@ class ThermocouplePeripheral:
     def connected(self):
         return self.opened and any(self._connected)
 
-    def close(self):
+    def close(self, for_reconnect=False):
         with self._op_lock:
             self.opened = False
             with self._lock:
@@ -176,8 +259,18 @@ class ThermocouplePeripheral:
                 except Exception:
                     pass
             self._channels.clear()
-            if self.server_hostname:
-                _net_remove_server(self._server_name)
+            if self._server_name:
+                sn = self._server_name
+                self._server_name = None
+                _server_release(sn)
+
+    def _on_server_removed(self):
+        """Called by the Net server-removed event handler.  Immediately clears
+        connection state so the poll loop detects the disconnect on the next
+        cycle without waiting for on_detach to fire."""
+        with self._lock:
+            self._connected = [False] * self.NUM_CHANNELS
+            self._values = [None] * self.NUM_CHANNELS
 
     def read(self):
         """Return list of 4 temperature values (°C), None for unavailable channels."""
@@ -193,7 +286,20 @@ class ThermocouplePeripheral:
                     values.append(self._values[i])
         return values
 
+    def _sync_attachment(self):
+        """Probe getAttached() for each channel — the C library updates this
+        flag when on_detach fires.  Catches any missed lifecycle events."""
+        for i, ch in enumerate(self._channels):
+            try:
+                if not ch.getAttached():
+                    with self._lock:
+                        self._connected[i] = False
+                        self._values[i] = None
+            except Exception:
+                pass
+
     def get_state(self):
+        self._sync_attachment()
         return {
             'peripheral_id': self.peripheral_id,
             'name': self.name,
@@ -256,7 +362,7 @@ class RelayPeripheral:
         self._op_lock = _cthread.allocate_lock()  # serialises open() / close()
         self.opened = False
         self.error = None
-        self._server_name = f"phidget_{self.peripheral_id}"
+        self._server_name = None  # assigned by _server_acquire
 
     @property
     def connected(self):
@@ -271,9 +377,8 @@ class RelayPeripheral:
                 return True  # already open; caller must close() first to re-open
             try:
                 if self.server_hostname:
-                    _net_add_server(
-                        self._server_name,
-                        self.server_hostname, self.server_port, self.server_password
+                    self._server_name = _server_acquire(
+                        self.server_hostname, self.server_port, self.server_password, self
                     )
                 for i in range(self.NUM_CHANNELS):
                     ch = DigitalOutput()
@@ -289,13 +394,31 @@ class RelayPeripheral:
                     def on_attach(c, index=idx):
                         with self._lock:
                             self._connected[index] = True
+                        # Restore desired relay state after reconnection so a
+                        # close+open cycle does not lose active relay settings.
+                        desired = self._states[index]
+                        if desired:
+                            try:
+                                c.setState(True)
+                            except Exception:
+                                pass
 
                     def on_detach(c, index=idx):
                         with self._lock:
                             self._connected[index] = False
 
+                    def on_error(c, code, description, index=idx):
+                        # Do NOT clear _connected here.  On a power cycle, the hub
+                        # fires error events (unknown relay state, failsafe triggered)
+                        # immediately after on_attach, which would leave the channel
+                        # stuck as disconnected.  on_detach and _sync_attachment()
+                        # handle genuine disconnections; on_error is registered only
+                        # so the library delivers the event rather than suppressing it.
+                        pass
+
                     ch.setOnAttachHandler(on_attach)
                     ch.setOnDetachHandler(on_detach)
+                    ch.setOnErrorHandler(on_error)
                     ch.open()   # non-blocking; on_attach fires when device connects
                     self._channels.append(ch)
 
@@ -307,7 +430,7 @@ class RelayPeripheral:
                 self.opened = False
                 return False
 
-    def close(self):
+    def close(self, for_reconnect=False):
         # Mark as closed immediately so concurrent set_channel() calls
         # fail fast ("Device not opened") instead of hitting 0x34.
         with self._op_lock:
@@ -316,13 +439,23 @@ class RelayPeripheral:
                 self._connected = [False] * self.NUM_CHANNELS
             for ch in self._channels:
                 try:
-                    ch.setState(False)
+                    if not for_reconnect:
+                        ch.setState(False)  # safe shutdown — de-energise relays
                     ch.close()
                 except Exception:
                     pass
             self._channels.clear()
-            if self.server_hostname:
-                _net_remove_server(self._server_name)
+            if self._server_name:
+                sn = self._server_name
+                self._server_name = None
+                _server_release(sn)
+
+    def _on_server_removed(self):
+        """Called by the Net server-removed event handler.  Immediately clears
+        connection state so the poll loop detects the disconnect on the next
+        cycle without waiting for on_detach to fire."""
+        with self._lock:
+            self._connected = [False] * self.NUM_CHANNELS
 
     def set_channel(self, channel: int, state: bool):
         """Set a relay channel on or off. Returns (success, message)."""
@@ -330,9 +463,11 @@ class RelayPeripheral:
             return False, "Device not opened"
         if channel < 0 or channel >= self.NUM_CHANNELS:
             return False, f"Channel {channel} out of range"
-        with self._lock:
-            if not self._connected[channel]:
+        try:
+            if not self._channels[channel].getAttached():
                 return False, f"Channel {channel} not yet attached — the device may still be connecting"
+        except Exception:
+            return False, f"Channel {channel} not yet attached — the device may still be connecting"
         try:
             self._channels[channel].setState(state)
             with self._lock:
@@ -357,7 +492,18 @@ class RelayPeripheral:
                     states.append(self._states[i])
         return states
 
+    def _sync_attachment(self):
+        """Probe getAttached() for each channel — catches any missed events."""
+        for i, ch in enumerate(self._channels):
+            try:
+                if not ch.getAttached():
+                    with self._lock:
+                        self._connected[i] = False
+            except Exception:
+                pass
+
     def get_state(self):
+        self._sync_attachment()
         return {
             'peripheral_id': self.peripheral_id,
             'name': self.name,
@@ -412,9 +558,8 @@ class MechanicalRelayPeripheral(RelayPeripheral):
                 return True  # already open; caller must close() first to re-open
             try:
                 if self.server_hostname:
-                    _net_add_server(
-                        self._server_name,
-                        self.server_hostname, self.server_port, self.server_password
+                    self._server_name = _server_acquire(
+                        self.server_hostname, self.server_port, self.server_password, self
                     )
                 for i in range(self.NUM_CHANNELS):
                     ch = DigitalOutput()
@@ -437,13 +582,28 @@ class MechanicalRelayPeripheral(RelayPeripheral):
                             c.setFailsafeTime(MechanicalRelayPeripheral._FAILSAFE_MS)
                         except Exception:
                             pass  # older firmware may not support failsafe; non-fatal
+                        # Restore desired relay state after reconnection
+                        desired = self._states[index]
+                        if desired:
+                            try:
+                                c.setState(True)
+                            except Exception:
+                                pass
 
                     def on_detach(c, index=idx):
                         with self._lock:
                             self._connected[index] = False
 
+                    def on_error(c, code, description, index=idx):
+                        # Do NOT clear _connected here — same reasoning as
+                        # RelayPeripheral.  Mechanical relay boards additionally
+                        # fire a failsafe-triggered error on cold boot which would
+                        # clear _connected immediately after on_attach sets it.
+                        pass
+
                     ch.setOnAttachHandler(on_attach)
                     ch.setOnDetachHandler(on_detach)
+                    ch.setOnErrorHandler(on_error)
                     ch.open()   # non-blocking; failsafe is configured in on_attach
                     self._channels.append(ch)
 
@@ -505,7 +665,7 @@ class PressureVINTPeripheral:
         self._lock = threading.Lock()
         self.opened = False
         self.error = None
-        self._server_name = f"phidget_{self.peripheral_id}"
+        self._server_name = None  # assigned by _server_acquire
         self._op_lock = _cthread.allocate_lock()  # serialises open() / close()
 
     @property
@@ -521,9 +681,8 @@ class PressureVINTPeripheral:
                 return True  # already open; caller must close() first to re-open
             try:
                 if self.server_hostname:
-                    _net_add_server(
-                        self._server_name,
-                        self.server_hostname, self.server_port, self.server_password
+                    self._server_name = _server_acquire(
+                        self.server_hostname, self.server_port, self.server_password, self
                     )
                 ch = VoltageRatioInput()
                 if self.server_hostname:
@@ -545,12 +704,18 @@ class PressureVINTPeripheral:
                         self._channel_connected = False
                         self._values[0] = None
 
+                def on_error(c, code, description):
+                    # Do not clear _channel_connected — on_detach and
+                    # _sync_attachment() handle genuine disconnections.
+                    pass
+
                 def on_ratio(c, ratio):
                     with self._lock:
                         self._values[0] = ratio * scale + offset
 
                 ch.setOnAttachHandler(on_attach)
                 ch.setOnDetachHandler(on_detach)
+                ch.setOnErrorHandler(on_error)
                 ch.setOnVoltageRatioChangeHandler(on_ratio)
                 ch.open()
                 self._channels.append(ch)
@@ -563,7 +728,7 @@ class PressureVINTPeripheral:
                 self.opened = False
                 return False
 
-    def close(self):
+    def close(self, for_reconnect=False):
         with self._op_lock:
             self.opened = False
             with self._lock:
@@ -574,8 +739,18 @@ class PressureVINTPeripheral:
                 except Exception:
                     pass
             self._channels.clear()
-            if self.server_hostname:
-                _net_remove_server(self._server_name)
+            if self._server_name:
+                sn = self._server_name
+                self._server_name = None
+                _server_release(sn)
+
+    def _on_server_removed(self):
+        """Called by the Net server-removed event handler.  Immediately clears
+        connection state so the poll loop detects the disconnect on the next
+        cycle without waiting for on_detach to fire."""
+        with self._lock:
+            self._channel_connected = False
+            self._values = [None]
 
     def read(self):
         if not self._channels:
@@ -589,7 +764,19 @@ class PressureVINTPeripheral:
             with self._lock:
                 return list(self._values)
 
+    def _sync_attachment(self):
+        """Probe getAttached() — catches any missed lifecycle events."""
+        if not self._channels:
+            return
+        try:
+            if not self._channels[0].getAttached():
+                with self._lock:
+                    self._channel_connected = False
+        except Exception:
+            pass
+
     def get_state(self):
+        self._sync_attachment()
         return {
             'peripheral_id': self.peripheral_id,
             'name': self.name,
@@ -664,6 +851,95 @@ def create_peripheral(config: dict):
         units = config.get('units', 'psia')
         return PressureVINTPeripheral(pid, name, hub, hub_port, calibration, units, srv_host, srv_port, srv_pass, labels)
     return None
+
+
+# ── Server-level TCP health monitor ──────────────────────────────────────────
+#
+# The Phidget C library's on_detach fires reliably for graceful disconnects,
+# but when the VINT hub loses power (hard power cycle), the TCP connection
+# dies silently.  The C library's internal keepalive may take 30+ seconds to
+# notice — or may never fire for DigitalOutput channels.
+#
+# This monitor is *completely decoupled* from individual peripherals.  It
+# probes each unique server host:port with a raw TCP connect (2 s timeout).
+# If the probe fails, it calls _on_server_removed() on every peripheral
+# registered to that server, immediately clearing their _connected flags so
+# the poll loop can trigger a close+open cycle.
+#
+# The monitor is meant to be called once every few seconds from the poll loop
+# in device_manager.
+
+import socket as _socket
+
+_server_health_last: dict[tuple[str, int], float] = {}   # (host, port) -> last_check monotonic
+_SERVER_HEALTH_INTERVAL = 3.0  # seconds between probes for the same endpoint
+_SERVER_HEALTH_TIMEOUT = 2.0   # TCP connect timeout
+
+
+def check_server_health(peripherals: dict):
+    """Probe each unique Phidget server endpoint used by the given peripherals.
+
+    For each unique (hostname, port), attempt a raw TCP connect.  If it fails,
+    call _on_server_removed() on every peripheral using that endpoint so the
+    poll loop detects the disconnect immediately.
+
+    Parameters
+    ----------
+    peripherals : dict
+        peripheral_id -> peripheral object mapping (from DeviceManager._peripherals)
+    """
+    if not PHIDGET_AVAILABLE:
+        return
+
+    now = time.monotonic()
+
+    # Group peripherals by server endpoint
+    endpoints: dict[tuple[str, int], list] = {}
+    for periph in peripherals.values():
+        host = getattr(periph, 'server_hostname', None)
+        if not host:
+            continue
+        port = getattr(periph, 'server_port', 5661)
+        key = (host, port)
+        endpoints.setdefault(key, []).append(periph)
+
+    for (host, port), periphs in endpoints.items():
+        # Rate-limit probes — no more than once per _SERVER_HEALTH_INTERVAL
+        last = _server_health_last.get((host, port), 0)
+        if now - last < _SERVER_HEALTH_INTERVAL:
+            continue
+        _server_health_last[(host, port)] = now
+
+        # Only probe if at least one peripheral thinks it's connected.
+        # If all are already disconnected, the poll loop is already handling
+        # reconnection — no need to add probe overhead.
+        any_connected = any(getattr(p, 'connected', False) for p in periphs)
+        if not any_connected:
+            continue
+
+        # Raw TCP connect probe
+        reachable = False
+        try:
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(_SERVER_HEALTH_TIMEOUT)
+            sock.connect((host, port))
+            reachable = True
+        except Exception:
+            reachable = False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        if not reachable:
+            # Server unreachable — force-disconnect all peripherals on this
+            # endpoint so the poll loop triggers close+open immediately.
+            for p in periphs:
+                try:
+                    p._on_server_removed()
+                except Exception:
+                    pass
 
 
 PHIDGET_AVAILABLE_FLAG = PHIDGET_AVAILABLE
