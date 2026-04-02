@@ -1,1 +1,0 @@
-{"timestamp": "2026-04-01T21:00:22.367272+00:00", "running_state": {"16beaf00": {"device_name": "MR-02", "logging": true, "last_setpoint": 250.0, "schedule_running": false, "schedule_start_time": null, "schedule_current_step": 0, "schedule_data": null}, "_experiment": null}}
