@@ -9,6 +9,7 @@ import csv
 import io
 import os
 import threading
+import traceback
 import gevent
 import gevent.pool
 import time
@@ -141,6 +142,9 @@ class DeviceManager:
                     if success:
                         device.read_device_info()
                         self._check_serial_mismatch(device)
+                except Exception:
+                    print(f"[DeviceManager] connect error for {device_id}:", flush=True)
+                    traceback.print_exc()
                 finally:
                     self._last_reconnect[device_id] = time.time()
                     self._reconnecting.discard(device_id)
@@ -289,14 +293,19 @@ class DeviceManager:
         self._last_reconnect[device_id] = time.time()
 
         def do_connect():
-            success = device.connect()
-            if success:
-                device.read_device_info()
-                self._check_serial_mismatch(device)
-            self._last_reconnect[device_id] = time.time()
-            # Always broadcast the final state so the UI stops showing "disconnected"
-            # even if the reconnect was fast and the poll loop missed the None→True transition.
-            self.socketio.emit('device_update', self.get_device_state(device_id))
+            try:
+                success = device.connect()
+                if success:
+                    device.read_device_info()
+                    self._check_serial_mismatch(device)
+            except Exception:
+                print(f"[DeviceManager] do_connect error for {device_id}:", flush=True)
+                traceback.print_exc()
+            finally:
+                self._last_reconnect[device_id] = time.time()
+                # Always broadcast the final state so the UI stops showing "disconnected"
+                # even if the reconnect was fast and the poll loop missed the None→True transition.
+                self.socketio.emit('device_update', self.get_device_state(device_id))
         threading.Thread(target=do_connect, daemon=True).start()
 
         return {'success': True}

@@ -114,6 +114,48 @@ def _emit_log(msg: str, level: str = 'info'):
         pass
 
 
+# ── Thread & Greenlet Error Forwarding ───────────────────────────────────────
+# gevent.monkey.patch_all() replaces threading.Thread with greenlet-backed
+# wrappers whose unhandled exceptions route through the gevent hub rather than
+# threading.excepthook.  We install handlers on both paths so that no exception
+# from any concurrent context can disappear silently.
+
+def _thread_excepthook(args):
+    """Forward any unhandled threading.Thread exception to the CLI and UI log."""
+    if args.exc_type is SystemExit:
+        return
+    tb_str = ''.join(traceback.format_exception(
+        args.exc_type, args.exc_value, args.exc_tb))
+    label = getattr(args.thread, 'name', repr(args.thread))
+    _emit_log(f"[Thread:{label}] Unhandled exception:\n{tb_str.rstrip()}", 'error')
+
+threading.excepthook = _thread_excepthook
+
+# Gevent hub error handler is patched at startup (after the hub exists) inside
+# the __main__ block; see _install_gevent_error_handler() below.
+
+def _install_gevent_error_handler():
+    """
+    Patch the gevent hub instance so unhandled greenlet exceptions are logged.
+    Must be called after monkey-patching and hub creation (i.e. inside __main__).
+    GreenletExit and SystemExit are intentional lifecycle events and are left
+    to gevent's default handler unchanged.
+    """
+    _hub = gevent.get_hub()
+    _orig = _hub.handle_error
+
+    def _hub_error_handler(context, exc_type, exc_value, exc_tb):
+        if not issubclass(exc_type, (gevent.GreenletExit, SystemExit)):
+            tb_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+            _emit_log(
+                f"[Greenlet] Unhandled exception in {context!r}:\n{tb_str.rstrip()}",
+                'error',
+            )
+        return _orig(context, exc_type, exc_value, exc_tb)
+
+    _hub.handle_error = _hub_error_handler
+
+
 device_mgr = DeviceManager(state, socketio)
 experiment_mgr = ExperimentManager(CONFIG_DIR, DATA_DIR)
 mqtt_relay = MqttRelay()
@@ -1655,6 +1697,9 @@ if __name__ == '__main__':
     device_count = len(saved_config.get('alicat', {}))
     periph_count = len(saved_config.get('peripherals', {}))
     print(f"  Loaded {device_count} Alicat device(s), {periph_count} peripheral(s) from config.")
+
+    # Install gevent hub error handler now that the hub and socketio exist.
+    _install_gevent_error_handler()
 
     # Start background polling (use socketio helper so gevent schedules it properly)
     socketio.start_background_task(_polling_loop)

@@ -6,12 +6,12 @@
       "unit_id": 1,
       "device_type": "MC",
       "device_name": "MR-01",
-      "max_flow": 1000.0,
+      "max_flow": 1300.0,
       "lat": 40.595952,
       "lon": -105.141926,
       "alt": 1568.0,
       "expected_serial": "525213",
-      "serial_number": "525213",
+      "serial_number": null,
       "gas_number": 189,
       "disabled": false
     },
@@ -81,7 +81,7 @@
       "unit_id": 1,
       "device_type": "MC",
       "device_name": "MR-06",
-      "max_flow": 250.0,
+      "max_flow": 50.0,
       "lat": 40.595346,
       "lon": -105.141256,
       "alt": 1566.0,
@@ -99,8 +99,8 @@
       "hub_serial": null,
       "hub_port": 3,
       "calibration": [
-        1.0,
-        0.0
+        4532.44,
+        -440.84
       ],
       "units": "psia",
       "server_hostname": "192.168.109.1",
