@@ -20,6 +20,8 @@ const app = (() => {
   let _devices = {};         // deviceId -> device state dict
   window._getAppDevices = () => _devices;  // expose for expUI (getter always returns current ref)
   let _peripherals = {};     // peripheralId -> peripheral state dict
+  let _emissionPoints = [];  // ordered list of EP state dicts (TEST EP always first)
+  window._getEmissionPoints = () => _emissionPoints;
   let _parsedSchedule = {};  // deviceId -> [{time, rate}] (pending load)
 
   // ── Sessions & Chat State ─────────────────────────────────────────────────────
@@ -27,8 +29,15 @@ const app = (() => {
   let _allSessions = [];         // latest sessions list
   let _chatUnreadCount = 0;     // messages received while modal was closed
   let _chatModalShowing = false;
-  let _groundElevAdd  = null;   // terrain elevation (m ASL) fetched for Add Device form
-  let _groundElevEdit = null;   // terrain elevation (m ASL) fetched for Edit Device form
+
+  // Terrain elevation fetched for device form geo-pick (kept for _syncAltAgl compat)
+  let _groundElevAdd  = null;
+  let _groundElevEdit = null;
+
+  // ── EP photo upload state ─────────────────────────────────────────────────
+  let _addEpPendingPhotoFilename = null;   // uploaded filename for pending Add EP
+  let _editEpPendingPhotoFilename = null;  // uploaded filename for pending Edit EP
+  let _editEpClearPhoto = false;           // user requested photo removal
 
   // ── Collapsed device cards (persisted to localStorage) ────────────────────
   const _COLLAPSE_KEY = 'ec_collapsed_devices';
@@ -125,6 +134,7 @@ const app = (() => {
     const devices = state.devices || [];
     const peripherals = state.peripherals || [];
 
+    _emissionPoints = state.emission_points || [];
     _devices = {};
     devices.forEach(d => { _devices[d.device_id] = d; });
     _peripherals = {};
@@ -137,6 +147,7 @@ const app = (() => {
       _mySessionToken = state.your_session_token;
     }
 
+    _renderAllEmissionPoints();
     _renderAllDevices();
     _renderAllPeripherals();
     _updateSectionLeds();
@@ -147,7 +158,10 @@ const app = (() => {
     _updateSystemStatus();
 
     // Update map markers
-    if (window.ecMap) window.ecMap.updateDevices(devices);
+    if (window.ecMap) {
+      window.ecMap.updateDevices(devices);
+      window.ecMap.updateEmissionPoints(_emissionPoints);
+    }
 
     if (state.crash_info && state.crash_info.detected) {
       _showCrashRecovery(state.crash_info);
@@ -363,11 +377,17 @@ const app = (() => {
 
     // Alert banner for fields that couldn't be read from device and need user input
     const _alertHtml = (() => {
-      if (!d.connected) return '';
       const errors = [];
       const warnings = [];
-      if (!d.max_flow) errors.push('Max flow not configured');
-      if (!d.serial_number && !d.expected_serial) warnings.push('Serial number unknown');
+      if ((d.emission_point_id || '__test__') === '__test__')
+        warnings.push('Using DEFAULT emission point — assign a real emission point before production use');
+      if (!d.connected) {
+        if (!errors.length && !warnings.length) return '';
+        // Show EP warning even when disconnected
+      } else {
+        if (!d.max_flow) errors.push('Max flow not configured');
+        if (!d.serial_number && !d.expected_serial) warnings.push('Serial number unknown');
+      }
       if (!errors.length && !warnings.length) return '';
       const items = [
         ...errors.map(m => `<span class="device-alert-item device-alert-error"><i class="fa fa-circle-exclamation"></i> ${m}</span>`),
@@ -409,6 +429,14 @@ const app = (() => {
             : `<span class="device-badge ${d.connected ? 'badge-connected' : 'badge-disconnected'}">${d.connected ? '● Connected' : '○ Disconnected'}</span>`
           }
           ${d.logging ? '<span class="device-badge badge-logging">● Logging</span>' : ''}
+          ${(() => {
+            const epId = d.emission_point_id || '__test__';
+            const ep = _emissionPoints.find(e => e.ep_id === epId);
+            const epName = ep ? ep.display_name : epId;
+            if (epId === '__test__')
+              return `<span class="device-badge badge-ep-test" title="Assigned to DEFAULT emission point — update before production use"><i class="fa fa-triangle-exclamation me-1"></i>${_esc(epName)}</span>`;
+            return `<span class="device-badge" style="background:rgba(63,185,80,0.12);color:#3fb950" title="Emission point: ${_esc(epName)}"><i class="fa fa-location-dot me-1"></i>${_esc(epName)}</span>`;
+          })()}
           <div class="d-flex gap-1 mt-1">
             <button class="btn btn-xs btn-outline-secondary" title="Edit" onclick="app.openEditDeviceModal('${d.device_id}')">
               <i class="fa fa-pen"></i>
@@ -839,12 +867,8 @@ const app = (() => {
 
     if (!host) { _showModalError(errEl, 'Host/IP is required'); return; }
 
-    const lat = document.getElementById('addDeviceLat').value;
-    const lon = document.getElementById('addDeviceLon').value;
-    const alt = document.getElementById('addDeviceAlt').value;
+    const epId = document.getElementById('addDeviceEp')?.value || '__test__';
     const expectedSerial = document.getElementById('addDeviceExpSerial')?.value.trim() || '';
-
-    if (lat === '' || lon === '') { _showModalError(errEl, 'Location (lat/lon) is required'); return; }
     if (!expectedSerial) { _showModalError(errEl, 'Expected Serial # is required'); return; }
 
     if (errEl) errEl.classList.add('d-none');
@@ -861,20 +885,15 @@ const app = (() => {
       host, port, device_name: name, device_type: type,
       unit_id: unitId, max_flow: maxFlow ? parseFloat(maxFlow) : null,
       expected_serial: expectedSerial || null,
-      lat: lat !== '' ? parseFloat(lat) : null,
-      lon: lon !== '' ? parseFloat(lon) : null,
-      alt: alt !== '' ? parseFloat(alt) : null,
+      emission_point_id: epId,
     });
   }
 
   function _clearAddDeviceForm() {
-    ['addDeviceHost','addDeviceName','addDeviceMaxFlow','addDeviceLat','addDeviceLon','addDeviceAlt','addDeviceAgl','addDeviceExpSerial'].forEach(id => {
+    ['addDeviceHost','addDeviceName','addDeviceMaxFlow','addDeviceExpSerial'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.value = '';
     });
-    const hintEl = document.getElementById('addDeviceAglHint');
-    if (hintEl) hintEl.textContent = '';
-    _groundElevAdd = null;
   }
 
   // ── Collapse / Expand Device Card ────────────────────────────────────────
@@ -902,10 +921,20 @@ const app = (() => {
 
   // ── Collapsible panel sections (Flow Controllers / Peripherals) ────────────
 
+  const _SECTION_LIST_MAP = {
+    devices:          'deviceList',
+    peripherals:      'peripheralList',
+    emission_points:  'emissionPointList',
+  };
+  const _SECTION_LED_MAP = {
+    devices:     'deviceLedStrip',
+    peripherals: 'peripheralLedStrip',
+  };
+
   function toggleSectionCollapse(sectionId) {
-    const listEl   = document.getElementById(sectionId === 'devices' ? 'deviceList' : 'peripheralList');
+    const listEl   = document.getElementById(_SECTION_LIST_MAP[sectionId]);
     const chevron  = document.getElementById('sectionChevron-' + sectionId);
-    const ledStrip = document.getElementById(sectionId === 'devices' ? 'deviceLedStrip' : 'peripheralLedStrip');
+    const ledStrip = document.getElementById(_SECTION_LED_MAP[sectionId] || '');
     if (!listEl) return;
     const collapsed = listEl.classList.toggle('d-none');
     if (chevron)   chevron.className = `fa fa-chevron-${collapsed ? 'right' : 'down'} me-1`;
@@ -914,12 +943,12 @@ const app = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    ['devices', 'peripherals'].forEach(sid => {
+    Object.keys(_SECTION_LIST_MAP).forEach(sid => {
       try {
         const val      = localStorage.getItem('section-collapsed-' + sid);
-        const listEl   = document.getElementById(sid === 'devices' ? 'deviceList' : 'peripheralList');
+        const listEl   = document.getElementById(_SECTION_LIST_MAP[sid]);
         const chevron  = document.getElementById('sectionChevron-' + sid);
-        const ledStrip = document.getElementById(sid === 'devices' ? 'deviceLedStrip' : 'peripheralLedStrip');
+        const ledStrip = document.getElementById(_SECTION_LED_MAP[sid] || '');
         if (val === '1' && listEl) {
           listEl.classList.add('d-none');
           if (chevron)   chevron.className = 'fa fa-chevron-right me-1';
@@ -1071,8 +1100,6 @@ const app = (() => {
       const aglEl  = document.getElementById(aglId);
       if (hintEl) hintEl.textContent = 'Fetching elevation…';
       const elev = await _fetchGroundElev(lat, lon);
-      if (context === 'edit') _groundElevEdit = elev;
-      else                    _groundElevAdd  = elev;
       if (elev != null) {
         if (altEl) altEl.value = elev.toFixed(1);
         if (aglEl) aglEl.value = '0';
@@ -1104,15 +1131,8 @@ const app = (() => {
       else
         reportedHint.textContent = 'Device max not yet read';
     }
-    document.getElementById('editDeviceLat').value = d.lat != null ? d.lat : '';
-    document.getElementById('editDeviceAlt').value = d.alt != null ? d.alt : '';
-    document.getElementById('editDeviceLon').value = d.lon != null ? d.lon : '';
-    // Reset ground elevation — user can re-pick from map to get updated ground level
-    _groundElevEdit = null;
-    const _eAglEl   = document.getElementById('editDeviceAgl');
-    const _eAglHint = document.getElementById('editDeviceAglHint');
-    if (_eAglEl)   _eAglEl.value = '';
-    if (_eAglHint) _eAglHint.textContent = '';
+    _populateEpDropdown('editDeviceEp', d.emission_point_id || '__test__');
+    _updateEpWarning('editDeviceEp', 'editDeviceEpTestWarn');
     document.getElementById('editDeviceExpSerial').value = d.expected_serial || '';
     document.getElementById('editDeviceError').classList.add('d-none');
     new bootstrap.Modal(document.getElementById('editDeviceModal')).show();
@@ -1121,15 +1141,13 @@ const app = (() => {
   function saveEditDevice() {
     const deviceId = document.getElementById('editDeviceId').value;
     const host = document.getElementById('editDeviceHost').value.trim();
-    const editLat = document.getElementById('editDeviceLat').value;
-    const editLon = document.getElementById('editDeviceLon').value;
-    const editAlt = document.getElementById('editDeviceAlt').value;
     const editExpSerial = document.getElementById('editDeviceExpSerial')?.value.trim() || '';
     const errEl = document.getElementById('editDeviceError');
 
     if (!host) { _showModalError(errEl, 'Host/IP is required'); return; }
-    if (editLat === '' || editLon === '') { _showModalError(errEl, 'Location (lat/lon) is required'); return; }
     if (!editExpSerial) { _showModalError(errEl, 'Expected Serial # is required'); return; }
+
+    const epId = document.getElementById('editDeviceEp')?.value || '__test__';
 
     errEl.classList.add('d-none');
     const modalEl = document.getElementById('editDeviceModal');
@@ -1148,9 +1166,7 @@ const app = (() => {
       unit_id: parseInt(document.getElementById('editDeviceUnit').value) || 1,
       device_type: document.getElementById('editDeviceType').value,
       max_flow: document.getElementById('editDeviceMaxFlow').value || null,
-      lat: editLat !== '' ? parseFloat(editLat) : '',
-      lon: editLon !== '' ? parseFloat(editLon) : '',
-      alt: editAlt !== '' ? parseFloat(editAlt) : '',
+      emission_point_id: epId,
       expected_serial: editExpSerial,
     });
   }
@@ -1885,28 +1901,56 @@ const app = (() => {
   (function initSortable() {
     const devList = document.getElementById('deviceList');
     const periphList = document.getElementById('peripheralList');
-    if (!devList || !periphList || typeof Sortable === 'undefined') return;
+    const epList = document.getElementById('emissionPointList');
+    if (typeof Sortable === 'undefined') return;
 
-    Sortable.create(devList, {
-      animation: 150,
-      handle: '.drag-handle',
-      onEnd() {
-        const ids = Array.from(devList.querySelectorAll('.device-card')).map(c => c.dataset.deviceId);
-        _saveOrder(DEVICE_ORDER_KEY, ids);
-        socket.emit('reorder_devices', { order: ids });
-      }
-    });
+    if (devList) {
+      Sortable.create(devList, {
+        animation: 150,
+        handle: '.drag-handle',
+        onEnd() {
+          const ids = Array.from(devList.querySelectorAll('.device-card')).map(c => c.dataset.deviceId);
+          _saveOrder(DEVICE_ORDER_KEY, ids);
+          socket.emit('reorder_devices', { order: ids });
+        }
+      });
+    }
 
-    Sortable.create(periphList, {
-      animation: 150,
-      handle: '.drag-handle',
-      onEnd() {
-        const ids = Array.from(periphList.querySelectorAll('.peripheral-card')).map(c => c.dataset.peripheralId);
-        _saveOrder(PERIPH_ORDER_KEY, ids);
-        socket.emit('reorder_peripherals', { order: ids });
-      }
-    });
+    if (periphList) {
+      Sortable.create(periphList, {
+        animation: 150,
+        handle: '.drag-handle',
+        onEnd() {
+          const ids = Array.from(periphList.querySelectorAll('.peripheral-card')).map(c => c.dataset.peripheralId);
+          _saveOrder(PERIPH_ORDER_KEY, ids);
+          socket.emit('reorder_peripherals', { order: ids });
+        }
+      });
+    }
+
+    if (epList) {
+      Sortable.create(epList, {
+        animation: 150,
+        handle: '.drag-handle',
+        filter: '.ep-test',        // prevent TEST EP from being dragged
+        onEnd() {
+          const ids = Array.from(epList.querySelectorAll('.ep-card:not(.ep-test)')).map(c => c.dataset.epId);
+          socket.emit('reorder_emission_points', { order: ids });
+        }
+      });
+    }
   })();
+
+  // Populate EP dropdown when Add Device modal opens
+  document.addEventListener('DOMContentLoaded', () => {
+    const addDeviceModalEl = document.getElementById('addDeviceModal');
+    if (addDeviceModalEl) {
+      addDeviceModalEl.addEventListener('show.bs.modal', () => {
+        _populateEpDropdown('addDeviceEp', '__test__');
+        _updateEpWarning('addDeviceEp', 'addDeviceEpTestWarn');
+      });
+    }
+  });
 
   // Re-apply stored order after each full state refresh
   socket.on('state', () => {
@@ -1974,6 +2018,437 @@ const app = (() => {
     }
   });
 
+  // ── Emission Point Helpers ────────────────────────────────────────────────
+
+  function _populateEpDropdown(selectId, selectedEpId) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    sel.innerHTML = '';
+    _emissionPoints.forEach(ep => {
+      const opt = document.createElement('option');
+      opt.value = ep.ep_id;
+      opt.textContent = ep.is_test ? `${ep.display_name} (Default — assign before production use)` : ep.display_name;
+      if (ep.ep_id === (selectedEpId || '__test__')) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function _updateEpWarning(selectId, warnId) {
+    const sel = document.getElementById(selectId);
+    const warn = document.getElementById(warnId);
+    if (!sel || !warn) return;
+    warn.classList.toggle('d-none', sel.value !== '__test__');
+  }
+
+  function onAddDeviceEpChange() {
+    _updateEpWarning('addDeviceEp', 'addDeviceEpTestWarn');
+  }
+
+  function onEditDeviceEpChange() {
+    _updateEpWarning('editDeviceEp', 'editDeviceEpTestWarn');
+  }
+
+  // ── Emission Point Rendering ──────────────────────────────────────────────
+
+  function _renderAllEmissionPoints() {
+    const list = document.getElementById('emissionPointList');
+    const noMsg = document.getElementById('noEpMsg');
+    if (!list) return;
+
+    // Remove cards no longer in _emissionPoints
+    const epIds = new Set(_emissionPoints.map(e => e.ep_id));
+    Array.from(list.querySelectorAll('.ep-card')).forEach(card => {
+      if (!epIds.has(card.dataset.epId)) card.remove();
+    });
+
+    // Count non-TEST EPs for empty message
+    const nonTestCount = _emissionPoints.filter(e => !e.is_test).length;
+    if (noMsg) noMsg.style.display = nonTestCount === 0 ? 'block' : 'none';
+
+    _emissionPoints.forEach(ep => _renderEmissionPoint(ep));
+  }
+
+  function _renderEmissionPoint(ep) {
+    const list = document.getElementById('emissionPointList');
+    if (!list) return;
+
+    let card = document.getElementById(`ep-card-${ep.ep_id}`);
+    const isNew = !card;
+    if (isNew) {
+      card = document.createElement('div');
+      card.id = `ep-card-${ep.ep_id}`;
+      card.dataset.epId = ep.ep_id;
+      if (ep.is_test) {
+        list.insertBefore(card, list.firstChild);  // TEST always first
+      } else {
+        list.appendChild(card);
+      }
+    }
+
+    card.className = `ep-card${ep.is_test ? ' ep-test' : ''}`;
+
+    const lat = ep.lat != null ? ep.lat.toFixed(6) : '—';
+    const lon = ep.lon != null ? ep.lon.toFixed(6) : '—';
+    const alt = ep.alt != null ? `${ep.alt.toFixed(1)} m ASL` : '—';
+    const installDate = ep.install_datetime
+      ? ep.install_datetime.replace('T', ' ').substring(0, 16)
+      : '—';
+    const photoHtml = ep.photo_filename
+      ? `<img src="/static/ep_photos/${_esc(ep.photo_filename)}" alt="photo" class="ep-photo-thumb ms-2">`
+      : '';
+    const dragHandle = ep.is_test
+      ? ''
+      : `<span class="drag-handle" title="Drag to reorder"><i class="fa fa-grip-vertical"></i></span>`;
+    const actionBtns = ep.is_test
+      ? ''
+      : `<div class="d-flex gap-1 mt-1">
+           <button class="btn btn-xs btn-outline-secondary" title="Edit" onclick="app.openEditEpModal('${ep.ep_id}')">
+             <i class="fa fa-pen"></i>
+           </button>
+           <button class="btn btn-xs btn-outline-danger" title="Delete" onclick="app.removeEmissionPoint('${ep.ep_id}')">
+             <i class="fa fa-trash"></i>
+           </button>
+         </div>`;
+    const versionBadge = ep.is_test
+      ? `<span class="device-badge badge-ep-test ms-1">TEST</span>`
+      : (ep.version > 1
+          ? `<span class="device-badge ms-1" style="background:rgba(88,166,255,0.15);color:#58a6ff">v${ep.version}</span>`
+          : '');
+
+    card.innerHTML = `
+      <div class="ep-card-header">
+        ${dragHandle}
+        <div style="min-width:0;flex:1">
+          <div class="ep-name">${_esc(ep.display_name)}${versionBadge}</div>
+          <div class="ep-desc" title="${_esc(ep.description)}">${_esc(ep.description)}</div>
+          <div class="ep-coords"><i class="fa fa-location-dot me-1" style="font-size:0.65rem"></i>${lat}, ${lon} · ${alt}</div>
+          <div class="ep-coords"><i class="fa fa-calendar me-1" style="font-size:0.65rem"></i>Installed: ${_esc(installDate)}</div>
+        </div>
+        <div class="d-flex flex-column align-items-end">
+          ${photoHtml}
+          ${actionBtns}
+        </div>
+      </div>`;
+  }
+
+  // ── Emission Point CRUD ───────────────────────────────────────────────────
+
+  function addEmissionPoint() {
+    const errEl = document.getElementById('addEpError');
+    const name    = document.getElementById('addEpName')?.value.trim() || '';
+    const desc    = document.getElementById('addEpDesc')?.value.trim() || '';
+    const lat     = document.getElementById('addEpLat')?.value;
+    const lon     = document.getElementById('addEpLon')?.value;
+    const alt     = document.getElementById('addEpAlt')?.value;
+    const install = document.getElementById('addEpInstallDate')?.value;
+
+    if (!name)    { _showModalError(errEl, 'Name is required'); return; }
+    if (!desc)    { _showModalError(errEl, 'Description is required'); return; }
+    if (!install) { _showModalError(errEl, 'Install date/time is required'); return; }
+    if (lat === '' || lon === '') { _showModalError(errEl, 'Location (lat/lon) is required'); return; }
+
+    if (errEl) errEl.classList.add('d-none');
+    const modalEl = document.getElementById('addEpModal');
+    socket.once('action_result', result => {
+      if (result.success) {
+        bootstrap.Modal.getInstance(modalEl)?.hide();
+        _clearAddEpForm();
+        window.switchMainTab('map');
+        if (window.ecMap && result.ep_id) window.ecMap.focusEp(result.ep_id);
+      } else if (result.error) {
+        _showModalError(errEl, result.error);
+      }
+    });
+    socket.emit('add_emission_point', {
+      base_name: name,
+      description: desc,
+      lat: parseFloat(lat),
+      lon: parseFloat(lon),
+      alt: alt !== '' ? parseFloat(alt) : null,
+      install_datetime: install,
+      photo_filename: _addEpPendingPhotoFilename || null,
+    });
+  }
+
+  function _clearAddEpForm() {
+    ['addEpName','addEpDesc','addEpLat','addEpLon','addEpAlt','addEpInstallDate','addEpRtkIp'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    const photoInput = document.getElementById('addEpPhoto');
+    if (photoInput) photoInput.value = '';
+    const preview = document.getElementById('addEpPhotoPreview');
+    if (preview) preview.classList.add('d-none');
+    _addEpPendingPhotoFilename = null;
+  }
+
+  function openEditEpModal(epId) {
+    const ep = _emissionPoints.find(e => e.ep_id === epId);
+    if (!ep || ep.is_test) return;
+
+    document.getElementById('editEpId').value = epId;
+    document.getElementById('editEpDesc').value = ep.description || '';
+    document.getElementById('editEpLat').value = ep.lat != null ? ep.lat : '';
+    document.getElementById('editEpLon').value = ep.lon != null ? ep.lon : '';
+    document.getElementById('editEpAlt').value = ep.alt != null ? ep.alt : '';
+    document.getElementById('editEpInstallDate').value = ep.install_datetime
+      ? ep.install_datetime.substring(0, 16)
+      : '';
+
+    // Show version preview
+    const preview = document.getElementById('editEpVersionPreview');
+    if (preview) preview.textContent = `${ep.base_name}_${ep.version + 1}`;
+
+    // Show existing photo
+    const thumb = document.getElementById('editEpPhotoThumb');
+    const clearBtn = document.getElementById('editEpPhotoClear');
+    if (ep.photo_filename) {
+      if (thumb) { thumb.src = `/static/ep_photos/${ep.photo_filename}`; thumb.classList.remove('d-none'); }
+      if (clearBtn) clearBtn.classList.remove('d-none');
+    } else {
+      if (thumb) thumb.classList.add('d-none');
+      if (clearBtn) clearBtn.classList.add('d-none');
+    }
+    _editEpPendingPhotoFilename = null;
+    _editEpClearPhoto = false;
+    const photoInput = document.getElementById('editEpPhoto');
+    if (photoInput) photoInput.value = '';
+
+    document.getElementById('editEpError').classList.add('d-none');
+    new bootstrap.Modal(document.getElementById('editEpModal')).show();
+  }
+
+  function saveEditEmissionPoint() {
+    const errEl = document.getElementById('editEpError');
+    const epId   = document.getElementById('editEpId')?.value || '';
+    const desc   = document.getElementById('editEpDesc')?.value.trim() || '';
+    const lat    = document.getElementById('editEpLat')?.value;
+    const lon    = document.getElementById('editEpLon')?.value;
+    const alt    = document.getElementById('editEpAlt')?.value;
+    const install = document.getElementById('editEpInstallDate')?.value;
+
+    if (!desc)    { _showModalError(errEl, 'Description is required'); return; }
+    if (!install) { _showModalError(errEl, 'Install date/time is required'); return; }
+    if (lat === '' || lon === '') { _showModalError(errEl, 'Location (lat/lon) is required'); return; }
+
+    const ep = _emissionPoints.find(e => e.ep_id === epId);
+    let photoFilename;
+    if (_editEpClearPhoto) {
+      photoFilename = null;
+    } else if (_editEpPendingPhotoFilename) {
+      photoFilename = _editEpPendingPhotoFilename;
+    } else {
+      photoFilename = ep?.photo_filename || null;
+    }
+
+    if (errEl) errEl.classList.add('d-none');
+    const modalEl = document.getElementById('editEpModal');
+    socket.once('action_result', result => {
+      if (result.success) {
+        bootstrap.Modal.getInstance(modalEl)?.hide();
+        _editEpPendingPhotoFilename = null;
+        _editEpClearPhoto = false;
+        window.switchMainTab('map');
+        if (window.ecMap) window.ecMap.focusEp(epId);
+      } else if (result.error) {
+        _showModalError(errEl, result.error);
+      }
+    });
+    socket.emit('edit_emission_point', {
+      ep_id: epId,
+      description: desc,
+      lat: parseFloat(lat),
+      lon: parseFloat(lon),
+      alt: alt !== '' ? parseFloat(alt) : null,
+      install_datetime: install,
+      photo_filename: photoFilename,
+    });
+  }
+
+  function removeEmissionPoint(epId) {
+    const ep = _emissionPoints.find(e => e.ep_id === epId);
+    if (!ep) return;
+    if (!confirm(
+      `Delete emission point "${ep.display_name}"?\n\n` +
+      `Any flow controllers assigned to it will be reset to the TEST emission point ` +
+      `and will need to be reassigned before production use.`
+    )) return;
+    socket.emit('delete_emission_point', { ep_id: epId });
+  }
+
+  // ── EP Photo Upload ───────────────────────────────────────────────────────
+
+  async function onEpPhotoSelected(context) {
+    const inputId = context === 'edit' ? 'editEpPhoto' : 'addEpPhoto';
+    const thumbId = context === 'edit' ? 'editEpPhotoThumb' : 'addEpPhotoThumb';
+    const previewId = context === 'edit' ? 'editEpPhotoPreview' : 'addEpPhotoPreview';
+    const clearBtnId = context === 'edit' ? 'editEpPhotoClear' : null;
+
+    const input = document.getElementById(inputId);
+    if (!input || !input.files[0]) return;
+
+    const formData = new FormData();
+    formData.append('file', input.files[0]);
+
+    try {
+      const resp = await fetch('/api/emission_points/upload_photo', { method: 'POST', body: formData });
+      const data = await resp.json();
+      if (data.success) {
+        if (context === 'edit') {
+          _editEpPendingPhotoFilename = data.filename;
+          _editEpClearPhoto = false;
+        } else {
+          _addEpPendingPhotoFilename = data.filename;
+        }
+        const thumb = document.getElementById(thumbId);
+        const preview = document.getElementById(previewId);
+        if (thumb) { thumb.src = `/static/ep_photos/${data.filename}`; thumb.classList.remove('d-none'); }
+        if (preview) preview.classList.remove('d-none');
+        if (clearBtnId) document.getElementById(clearBtnId)?.classList.remove('d-none');
+      } else {
+        _showToast(`Photo upload failed: ${data.error || 'Unknown error'}`, 'danger');
+      }
+    } catch (e) {
+      _showToast('Photo upload failed', 'danger');
+    }
+  }
+
+  function clearEpPhoto(context) {
+    if (context === 'edit') {
+      _editEpClearPhoto = true;
+      _editEpPendingPhotoFilename = null;
+      const thumb = document.getElementById('editEpPhotoThumb');
+      const clearBtn = document.getElementById('editEpPhotoClear');
+      if (thumb) thumb.classList.add('d-none');
+      if (clearBtn) clearBtn.classList.add('d-none');
+      const input = document.getElementById('editEpPhoto');
+      if (input) input.value = '';
+    } else {
+      _addEpPendingPhotoFilename = null;
+      const preview = document.getElementById('addEpPhotoPreview');
+      if (preview) preview.classList.add('d-none');
+      const input = document.getElementById('addEpPhoto');
+      if (input) input.value = '';
+    }
+  }
+
+  // ── EP Location Picker (reuses map geo-pick infrastructure) ───────────────
+
+  function pickEpLocation(context) {
+    const modalId = context === 'edit' ? 'editEpModal' : 'addEpModal';
+    const latId   = context === 'edit' ? 'editEpLat'   : 'addEpLat';
+    const lonId   = context === 'edit' ? 'editEpLon'   : 'addEpLon';
+    const altId   = context === 'edit' ? 'editEpAlt'   : 'addEpAlt';
+
+    const modalEl = document.getElementById(modalId);
+    const bsModal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    bsModal.hide();
+
+    window.switchMainTab('map');
+
+    if (!window.ecMap) {
+      console.warn('[pickEpLocation] ecMap not ready');
+      return;
+    }
+
+    window.ecMap.startGeoPick(async (lat, lon) => {
+      document.getElementById(latId).value = lat;
+      document.getElementById(lonId).value = lon;
+      const elev = await _fetchGroundElev(lat, lon);
+      if (elev != null) {
+        const altEl = document.getElementById(altId);
+        if (altEl) altEl.value = elev.toFixed(1);
+      }
+      bsModal.show();
+    });
+  }
+
+  // ── RTK Device Location Read ──────────────────────────────────────────────
+
+  // State for pending RTK accept
+  let _rtkPendingContext = null;
+  let _rtkPendingResult  = null;
+
+  function readRtkLocation(context) {
+    const ipId = context === 'edit' ? 'editEpRtkIp' : 'addEpRtkIp';
+    const ip   = (document.getElementById(ipId)?.value || '').trim();
+    if (!ip) {
+      alert('Enter the RTK device IP address before reading.');
+      return;
+    }
+
+    // Briefly show a loading state on the button
+    const btn = document.querySelector(
+      `#${context === 'edit' ? 'editEpModal' : 'addEpModal'} [onclick*="readRtkLocation"]`
+    );
+    const origHtml = btn?.innerHTML;
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Reading…';
+    }
+
+    socket.once('rtk_location_result', result => {
+      if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+
+      if (!result.success) {
+        alert(`RTK read failed:\n${result.error}`);
+        return;
+      }
+
+      // Stash result for acceptRtkLocation()
+      _rtkPendingContext = context;
+      _rtkPendingResult  = result;
+
+      // Populate confirm modal
+      document.getElementById('rtkConfirmLat').textContent = result.lat;
+      document.getElementById('rtkConfirmLon').textContent = result.lon;
+      document.getElementById('rtkConfirmAlt').textContent =
+        result.alt != null ? `${result.alt} m` : '—';
+      document.getElementById('rtkConfirmFix').textContent = result.fix_label || '—';
+
+      const warningEl = document.getElementById('rtkConfirmWarning');
+      const warningText = document.getElementById('rtkConfirmWarningText');
+      if (!result.rtk_fixed) {
+        const msg = result.rtk_float
+          ? `Warning: RTK Float fix (not Fixed). Location accuracy may be reduced.`
+          : `Warning: Fix mode is "${result.fix_label}" — not an RTK fix. Location accuracy may be poor.`;
+        warningText.textContent = msg;
+        warningEl.classList.remove('d-none');
+        document.getElementById('rtkConfirmAcceptBtn').className = 'btn btn-warning';
+        document.getElementById('rtkConfirmAcceptBtn').innerHTML =
+          '<i class="fa fa-exclamation-triangle me-1"></i>Accept Anyway';
+      } else {
+        warningEl.classList.add('d-none');
+        document.getElementById('rtkConfirmAcceptBtn').className = 'btn btn-success';
+        document.getElementById('rtkConfirmAcceptBtn').innerHTML =
+          '<i class="fa fa-check me-1"></i>Accept Location';
+      }
+
+      new bootstrap.Modal(document.getElementById('rtkConfirmModal')).show();
+    });
+
+    socket.emit('query_rtk_location', { ip });
+  }
+
+  function acceptRtkLocation() {
+    const result  = _rtkPendingResult;
+    const context = _rtkPendingContext;
+    if (!result || !context) return;
+
+    bootstrap.Modal.getInstance(document.getElementById('rtkConfirmModal'))?.hide();
+
+    const latId = context === 'edit' ? 'editEpLat' : 'addEpLat';
+    const lonId = context === 'edit' ? 'editEpLon' : 'addEpLon';
+    const altId = context === 'edit' ? 'editEpAlt' : 'addEpAlt';
+
+    document.getElementById(latId).value = result.lat;
+    document.getElementById(lonId).value = result.lon;
+    if (result.alt != null) document.getElementById(altId).value = result.alt;
+
+    _rtkPendingContext = null;
+    _rtkPendingResult  = null;
+  }
+
   // Public API ────────────────────────────────────────────────────────────
   return {
     addDevice, removeDevice, openEditDeviceModal, saveEditDevice, toggleDisableDevice, toggleDeviceCollapse, toggleSectionCollapse,
@@ -1996,6 +2471,10 @@ const app = (() => {
     saveFileRotationSettings,
     shutdownServer,
     sendChat, kickSession,
+    // Emission Points
+    addEmissionPoint, openEditEpModal, saveEditEmissionPoint, removeEmissionPoint,
+    onEpPhotoSelected, clearEpPhoto, pickEpLocation, readRtkLocation, acceptRtkLocation,
+    onAddDeviceEpChange, onEditDeviceEpChange,
   };
 
 })();

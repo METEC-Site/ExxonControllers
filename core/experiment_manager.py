@@ -381,6 +381,10 @@ class ExperimentManager:
             devices_info[device_name] = device.to_dict() | {
                 'serial_number': device.serial_number,
                 'gas_number': device.gas_number,
+                'ep_info': (
+                    device_mgr._ep_mgr.get_ep(getattr(device, 'emission_point_id', '__test__'))
+                    if device_mgr._ep_mgr else {}
+                ) or {},
             }
 
             # Start raw logging (device_manager handles Data/Raw/)

@@ -66,8 +66,26 @@
 <!-- ── Main Layout ─────────────────────────────────────────────────────────── -->
 <div class="ec-layout">
 
-  <!-- Left Panel: Devices + Peripherals -->
+  <!-- Left Panel: Emission Points + Devices + Peripherals -->
   <div class="ec-sidebar" id="devicePanel">
+
+    <!-- Emission Points -->
+    <div class="panel-section mb-2">
+      <div class="panel-header d-flex justify-content-between align-items-center">
+        <span class="section-collapse-toggle" onclick="app.toggleSectionCollapse('emission_points')" title="Collapse/expand">
+          <i class="fa fa-chevron-down me-1" id="sectionChevron-emission_points"></i>
+          <i class="fa fa-location-dot me-2 text-success"></i>Emission Points
+        </span>
+        <button class="btn btn-sm btn-success" data-bs-toggle="modal" data-bs-target="#addEpModal">
+          <i class="fa fa-plus"></i> Add
+        </button>
+      </div>
+      <div id="emissionPointList">
+        <div class="text-muted text-center py-3 small" id="noEpMsg">
+          No emission points configured. Click <strong>Add</strong> to create one.
+        </div>
+      </div>
+    </div>
 
     <!-- Alicat Flow Controllers -->
     <div class="panel-section">
@@ -445,34 +463,12 @@ function switchMainTab(tab) {
                  placeholder="Auto-detect" step="0.01" min="0">
         </div>
         <div class="mb-3">
-          <div class="d-flex align-items-center justify-content-between mb-1">
-            <label class="form-label mb-0">Location <span class="text-danger small">*</span></label>
-            <button type="button" class="btn btn-xs btn-outline-warning" onclick="app.pickGeoLocation('add')" title="Click a point on the map">
-              <i class="fa fa-crosshairs me-1"></i>Pick on Map
-            </button>
-          </div>
-          <div class="row g-2">
-            <div class="col-6">
-              <input type="number" class="form-control ec-input" id="addDeviceLat"
-                     placeholder="Latitude" step="any">
-            </div>
-            <div class="col-6">
-              <input type="number" class="form-control ec-input" id="addDeviceLon"
-                     placeholder="Longitude" step="any">
-            </div>
-          </div>
-          <div class="row g-2 mt-1">
-            <div class="col-6">
-              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Altitude (m ASL)</label>
-              <input type="number" class="form-control ec-input" id="addDeviceAlt"
-                     placeholder="Auto from map" step="any">
-            </div>
-            <div class="col-6">
-              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Height AGL (m)</label>
-              <input type="number" class="form-control ec-input" id="addDeviceAgl"
-                     placeholder="—" step="any">
-              <div class="form-text text-muted" id="addDeviceAglHint" style="font-size:0.68rem;min-height:1em"></div>
-            </div>
+          <label class="form-label">Emission Point <span class="text-danger small">*</span></label>
+          <select class="form-select ec-input" id="addDeviceEp" onchange="app.onAddDeviceEpChange()">
+            <!-- populated by app.js when modal opens -->
+          </select>
+          <div class="alert alert-warning py-1 px-2 mt-1 small d-none" id="addDeviceEpTestWarn">
+            <i class="fa fa-triangle-exclamation me-1"></i>TEST point selected — configure a real emission point before production use.
           </div>
         </div>
         <div class="mb-3">
@@ -485,6 +481,187 @@ function switchMainTab(tab) {
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn btn-success" onclick="app.addDevice()">
           <i class="fa fa-plug me-1"></i>Connect
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add Emission Point Modal ────────────────────────────────────────────── -->
+<div class="modal fade" id="addEpModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-plus-circle me-2 text-success"></i>Add Emission Point</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label">Name <span class="text-danger small">*</span>
+              <span class="text-muted small ms-1">(base label, e.g. EP38 — versioning appended automatically on edit)</span>
+            </label>
+            <input type="text" class="form-control ec-input" id="addEpName" placeholder="e.g. EP38">
+          </div>
+          <div class="col-12">
+            <label class="form-label">Description <span class="text-danger small">*</span></label>
+            <textarea class="form-control ec-input" id="addEpDesc" rows="2" placeholder="Brief description of this emission point location"></textarea>
+          </div>
+          <div class="col-12">
+            <div class="d-flex align-items-center justify-content-between mb-1">
+              <label class="form-label mb-0">Location <span class="text-danger small">*</span></label>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-xs btn-outline-info" onclick="app.readRtkLocation('add')" title="Read location from RTK device">
+                  <i class="fa fa-satellite-dish me-1"></i>Read from RTK
+                </button>
+                <button type="button" class="btn btn-xs btn-outline-warning" onclick="app.pickEpLocation('add')" title="Click a point on the map">
+                  <i class="fa fa-crosshairs me-1"></i>Pick on Map
+                </button>
+              </div>
+            </div>
+            <div class="input-group mb-2">
+              <span class="input-group-text ec-input small" style="min-width:90px">RTK Device IP</span>
+              <input type="text" class="form-control ec-input" id="addEpRtkIp" placeholder="e.g. 192.168.108.5">
+            </div>
+            <div class="row g-2">
+              <div class="col-4">
+                <input type="number" class="form-control ec-input" id="addEpLat" placeholder="Latitude" step="any">
+              </div>
+              <div class="col-4">
+                <input type="number" class="form-control ec-input" id="addEpLon" placeholder="Longitude" step="any">
+              </div>
+              <div class="col-4">
+                <input type="number" class="form-control ec-input" id="addEpAlt" placeholder="Altitude (m ASL)" step="any">
+              </div>
+            </div>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Install Date/Time <span class="text-danger small">*</span></label>
+            <input type="datetime-local" class="form-control ec-input" id="addEpInstallDate">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Photo <span class="text-muted small">(optional)</span></label>
+            <input type="file" class="form-control ec-input" id="addEpPhoto" accept="image/*" onchange="app.onEpPhotoSelected('add')">
+            <div class="mt-1 d-none" id="addEpPhotoPreview">
+              <img id="addEpPhotoThumb" src="" alt="preview" class="ep-photo-thumb">
+              <button type="button" class="btn btn-xs btn-outline-danger ms-1" onclick="app.clearEpPhoto('add')">
+                <i class="fa fa-times"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="addEpError" class="alert alert-danger py-2 small d-none mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-success" onclick="app.addEmissionPoint()">
+          <i class="fa fa-location-dot me-1"></i>Save Emission Point
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit Emission Point Modal ───────────────────────────────────────────── -->
+<div class="modal fade" id="editEpModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-pen me-2 text-success"></i>Edit Emission Point</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editEpId">
+        <div class="alert alert-warning py-2 small mb-3">
+          <i class="fa fa-triangle-exclamation me-1"></i>
+          Saving changes will increment the version of this emission point
+          (e.g. <strong id="editEpVersionPreview">EP38_2</strong>).
+          All assigned flow controllers will inherit the updated location.
+        </div>
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label">Description <span class="text-danger small">*</span></label>
+            <textarea class="form-control ec-input" id="editEpDesc" rows="2"></textarea>
+          </div>
+          <div class="col-12">
+            <div class="d-flex align-items-center justify-content-between mb-1">
+              <label class="form-label mb-0">Location <span class="text-danger small">*</span></label>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-xs btn-outline-info" onclick="app.readRtkLocation('edit')" title="Read location from RTK device">
+                  <i class="fa fa-satellite-dish me-1"></i>Read from RTK
+                </button>
+                <button type="button" class="btn btn-xs btn-outline-warning" onclick="app.pickEpLocation('edit')" title="Click a point on the map">
+                  <i class="fa fa-crosshairs me-1"></i>Pick on Map
+                </button>
+              </div>
+            </div>
+            <div class="input-group mb-2">
+              <span class="input-group-text ec-input small" style="min-width:90px">RTK Device IP</span>
+              <input type="text" class="form-control ec-input" id="editEpRtkIp" placeholder="e.g. 192.168.108.5">
+            </div>
+            <div class="row g-2">
+              <div class="col-4">
+                <input type="number" class="form-control ec-input" id="editEpLat" placeholder="Latitude" step="any">
+              </div>
+              <div class="col-4">
+                <input type="number" class="form-control ec-input" id="editEpLon" placeholder="Longitude" step="any">
+              </div>
+              <div class="col-4">
+                <input type="number" class="form-control ec-input" id="editEpAlt" placeholder="Altitude (m ASL)" step="any">
+              </div>
+            </div>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Install Date/Time <span class="text-danger small">*</span></label>
+            <input type="datetime-local" class="form-control ec-input" id="editEpInstallDate">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Photo <span class="text-muted small">(optional)</span></label>
+            <input type="file" class="form-control ec-input" id="editEpPhoto" accept="image/*" onchange="app.onEpPhotoSelected('edit')">
+            <div class="mt-1" id="editEpPhotoPreview">
+              <img id="editEpPhotoThumb" src="" alt="photo" class="ep-photo-thumb d-none">
+              <button type="button" class="btn btn-xs btn-outline-danger ms-1 d-none" id="editEpPhotoClear" onclick="app.clearEpPhoto('edit')">
+                <i class="fa fa-times"></i> Remove photo
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="editEpError" class="alert alert-danger py-2 small d-none mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="app.saveEditEmissionPoint()">
+          <i class="fa fa-save me-1"></i>Save &amp; Increment Version
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── RTK Location Confirm Modal ──────────────────────────────────────────── -->
+<div class="modal fade" id="rtkConfirmModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content ec-modal">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-satellite-dish me-2 text-warning"></i>RTK Location</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="rtkConfirmWarning" class="alert alert-warning py-2 small mb-3 d-none">
+          <i class="fa fa-triangle-exclamation me-1"></i>
+          <span id="rtkConfirmWarningText"></span>
+        </div>
+        <table class="table table-sm table-borderless table-dark mb-0">
+          <tr><td class="text-secondary">Latitude</td><td id="rtkConfirmLat">—</td></tr>
+          <tr><td class="text-secondary">Longitude</td><td id="rtkConfirmLon">—</td></tr>
+          <tr><td class="text-secondary">Altitude</td><td id="rtkConfirmAlt">—</td></tr>
+          <tr><td class="text-secondary">Fix Mode</td><td id="rtkConfirmFix">—</td></tr>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-success" id="rtkConfirmAcceptBtn" onclick="app.acceptRtkLocation()">
+          <i class="fa fa-check me-1"></i>Accept Location
         </button>
       </div>
     </div>
@@ -914,30 +1091,12 @@ function switchMainTab(tab) {
           </div>
         </div>
         <div class="mb-2">
-          <div class="d-flex align-items-center justify-content-between mb-1">
-            <label class="form-label mb-0">Location <span class="text-danger small">*</span></label>
-            <button type="button" class="btn btn-xs btn-outline-warning" onclick="app.pickGeoLocation('edit')" title="Click a point on the map">
-              <i class="fa fa-crosshairs me-1"></i>Pick on Map
-            </button>
-          </div>
-          <div class="row g-2">
-            <div class="col-6">
-              <input type="number" class="form-control ec-input" id="editDeviceLat" placeholder="Latitude" step="any">
-            </div>
-            <div class="col-6">
-              <input type="number" class="form-control ec-input" id="editDeviceLon" placeholder="Longitude" step="any">
-            </div>
-          </div>
-          <div class="row g-2 mt-1">
-            <div class="col-6">
-              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Altitude (m ASL)</label>
-              <input type="number" class="form-control ec-input" id="editDeviceAlt" placeholder="Altitude (m)" step="any">
-            </div>
-            <div class="col-6">
-              <label class="form-label mb-1" style="font-size:0.72rem;color:var(--text-muted)">Height AGL (m)</label>
-              <input type="number" class="form-control ec-input" id="editDeviceAgl" placeholder="—" step="any">
-              <div class="form-text text-muted" id="editDeviceAglHint" style="font-size:0.68rem;min-height:1em"></div>
-            </div>
+          <label class="form-label">Emission Point <span class="text-danger small">*</span></label>
+          <select class="form-select ec-input" id="editDeviceEp" onchange="app.onEditDeviceEpChange()">
+            <!-- populated by app.js when modal opens -->
+          </select>
+          <div class="alert alert-warning py-1 px-2 mt-1 small d-none" id="editDeviceEpTestWarn">
+            <i class="fa fa-triangle-exclamation me-1"></i>TEST point selected — configure a real emission point before production use.
           </div>
         </div>
         <div class="mb-2">

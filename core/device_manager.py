@@ -43,6 +43,7 @@ class DeviceManager:
     def __init__(self, state_manager, socketio):
         self.state = state_manager
         self.socketio = socketio
+        self._ep_mgr = None   # set via set_ep_mgr() after construction
 
         self._alicat: dict[str, AlicatDevice] = {}          # device_id -> AlicatDevice
         self._peripherals: dict = {}                         # peripheral_id -> peripheral obj
@@ -73,6 +74,10 @@ class DeviceManager:
         self._in_experiment_devices: set[str] = set()        # device_ids currently owned by a running experiment
 
         self._lock = threading.Lock()
+
+    def set_ep_mgr(self, ep_mgr):
+        """Attach the EmissionPointManager so start_device can look up EP info."""
+        self._ep_mgr = ep_mgr
 
     # ── Load from Persisted Config ─────────────────────────────────────────────
 
@@ -114,6 +119,7 @@ class DeviceManager:
             device_type=cfg.get('device_type', 'MCP'),
             device_name=cfg.get('device_name', cfg['host']),
             max_flow=cfg.get('max_flow'),
+            emission_point_id=cfg.get('emission_point_id', '__test__'),
             lat=cfg.get('lat'),
             lon=cfg.get('lon'),
             alt=cfg.get('alt'),
@@ -168,11 +174,6 @@ class DeviceManager:
             except (TypeError, ValueError):
                 return None
 
-        lat = _parse_coord(config.get('lat'))
-        lon = _parse_coord(config.get('lon'))
-        if lat is None or lon is None:
-            return {'success': False, 'error': 'Location (lat/lon) is required'}
-
         expected_serial = (config.get('expected_serial') or '').strip()
         if not expected_serial:
             return {'success': False, 'error': 'Expected Serial # is required'}
@@ -191,8 +192,9 @@ class DeviceManager:
             'device_type': config.get('device_type', 'AUTO').upper(),
             'device_name': device_name,
             'max_flow': float(config['max_flow']) if config.get('max_flow') else None,
-            'lat': lat,
-            'lon': lon,
+            'emission_point_id': config.get('emission_point_id', '__test__'),
+            'lat': _parse_coord(config.get('lat')),
+            'lon': _parse_coord(config.get('lon')),
             'alt': _parse_coord(config.get('alt')),
             'expected_serial': expected_serial,
         }
@@ -272,7 +274,10 @@ class DeviceManager:
         elif 'max_flow' in config and not config['max_flow']:
             # Empty string / None = clear the user cap
             device._max_flow_user = None
-        # lat/lon: accept empty string as "clear" (set to None)
+        # emission_point_id: update EP assignment
+        if 'emission_point_id' in config:
+            device.emission_point_id = config['emission_point_id'] or '__test__'
+        # lat/lon/alt: EP-cached values injected by app.py from EP lookup
         if 'lat' in config:
             raw = config['lat']
             device.lat = float(raw) if raw not in (None, '', 'null') else None
@@ -371,13 +376,24 @@ class DeviceManager:
                 if old_logger:
                     old_logger.close()
             rotation_minutes = self.state.get_settings().get('raw_file_rotation_minutes', 1440)
+
+            # Resolve emission point info for filename and metadata
+            ep_id = getattr(device, 'emission_point_id', '__test__')
+            ep_info = {}
+            if self._ep_mgr:
+                ep = self._ep_mgr.get_ep(ep_id)
+                if ep:
+                    ep_info = ep
+
             device_meta = {
-                'device_type': device.device_type,
-                'location':    device.device_name,
-                'serial':      getattr(device, 'serial_number', '') or '',
-                'lat':         device.lat if device.lat is not None else '',
-                'lon':         device.lon if device.lon is not None else '',
-                'alt':         device.alt if device.alt is not None else '',
+                'device_type':    device.device_type,
+                'location':       device.device_name,
+                'serial':         getattr(device, 'serial_number', '') or '',
+                'lat':            device.lat if device.lat is not None else '',
+                'lon':            device.lon if device.lon is not None else '',
+                'alt':            device.alt if device.alt is not None else '',
+                'ep_display_name': ep_info.get('display_name', 'TEST'),
+                'ep_info':        ep_info,
             }
             logger = RawDataLogger(device_name=device.device_name, data_dir=RAW_DATA_DIR,
                                    rotation_minutes=rotation_minutes, device_meta=device_meta)
@@ -1124,6 +1140,7 @@ class DeviceManager:
             'max_flow_reported': device.max_flow_reported,
             'max_flow_user': device._max_flow_user,
             'max_flow_is_fallback': device.max_flow_is_fallback,
+            'emission_point_id': device.emission_point_id,
             'lat': device.lat,
             'lon': device.lon,
             'alt': device.alt,

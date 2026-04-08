@@ -31,6 +31,7 @@ class StateManager:
         self._heartbeat_path = os.path.join(config_dir, 'heartbeat.json')
         self._solenoid_checklist_path = os.path.join(config_dir, 'solenoid_checklist.json')
         self._map_config_path = os.path.join(config_dir, 'map_config.json')
+        self._emission_points_path = os.path.join(config_dir, 'emission_points.json')
 
         self._chat_log_path = os.path.join(config_dir, 'chat_log.json')
 
@@ -39,6 +40,7 @@ class StateManager:
         self._devices = {}
         self._solenoid_checklist = []
         self._map_config = {'overlays': []}
+        self._emission_points = {'emission_points': {}, 'ep_order': []}
         self._crash_info = None          # populated by check_crash_recovery()
         self._crash_experiment_state = None
 
@@ -46,6 +48,7 @@ class StateManager:
         self._load_devices()
         self._load_solenoid_checklist()
         self._load_map_config()
+        self._load_emission_points()
 
     # ── Atomic write helper ───────────────────────────────────────────────────
 
@@ -164,6 +167,28 @@ class StateManager:
         """Persist current chat messages atomically."""
         with self._lock:
             self._atomic_write_json(self._chat_log_path, messages)
+
+    # ── Emission Points ───────────────────────────────────────────────────────
+
+    def _load_emission_points(self):
+        if os.path.exists(self._emission_points_path) and os.path.getsize(self._emission_points_path) > 0:
+            try:
+                with open(self._emission_points_path, 'r') as f:
+                    self._emission_points = json.load(f)
+            except Exception:
+                self._emission_points = {'emission_points': {}, 'ep_order': []}
+        else:
+            self._emission_points = {'emission_points': {}, 'ep_order': []}
+            self._atomic_write_json(self._emission_points_path, self._emission_points)
+
+    def get_emission_points(self) -> dict:
+        with self._lock:
+            return dict(self._emission_points)
+
+    def save_emission_points(self, config: dict):
+        with self._lock:
+            self._emission_points = config
+            self._atomic_write_json(self._emission_points_path, self._emission_points)
 
     # ── Map Configuration ─────────────────────────────────────────────────────
 

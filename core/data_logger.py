@@ -73,17 +73,23 @@ def _round_value(v, places):
 
 # ── RawDataLogger ──────────────────────────────────────────────────────────────
 
+def _safe_filename_part(value: str, fallback: str = '') -> str:
+    """Sanitise a string for use as a component of a filename."""
+    return (value or fallback).replace(' ', '_').replace('/', '-').replace('\\', '-')
+
+
 class RawDataLogger:
     """
     Appends Alicat readings to a time-rotating CSV in Data/Raw/.
-    File per device per rotation period: alicat_<name>_<period>.csv
+    File per device per rotation period:
+        <device_name>_<serial>_<ep_name>_<period>.csv
     A sidecar .txt metadata file is written alongside each new CSV file.
 
     rotation_minutes : rotation interval in minutes.
-        1440 (default) → daily  → alicat_NAME_2026-03-25.csv
-        720             → 12-hr  → alicat_NAME_2026-03-25T00.csv / T12.csv
-        360             → 6-hr   → alicat_NAME_2026-03-25T00.csv / T06.csv / …
-        60              → 1-hr   → alicat_NAME_2026-03-25T14.csv
+        1440 (default) → daily  → NAME_SN_EP_2026-03-25.csv
+        720             → 12-hr  → NAME_SN_EP_2026-03-25T00.csv / T12.csv
+        360             → 6-hr   → NAME_SN_EP_2026-03-25T00.csv / T06.csv / …
+        60              → 1-hr   → NAME_SN_EP_2026-03-25T14.csv
     """
 
     FIELDNAMES = [col for col, _, _ in _RAW_FIELD_MAP]
@@ -93,8 +99,13 @@ class RawDataLogger:
         self.device_name = device_name
         self.data_dir = data_dir
         self.rotation_minutes = max(1, int(rotation_minutes))
-        self._safe_name = device_name.replace(' ', '_').replace('/', '-')
+        self._safe_name = _safe_filename_part(device_name, 'device')
         self._device_meta = device_meta or {}
+        # Serial and EP name components derived from device_meta
+        self._safe_serial = _safe_filename_part(
+            self._device_meta.get('serial', ''), 'NoSerial')
+        self._safe_ep_name = _safe_filename_part(
+            self._device_meta.get('ep_display_name', ''), 'TEST')
         self._file = None
         self._writer = None
         self._current_period = None
@@ -117,12 +128,12 @@ class RawDataLogger:
         if self._current_period == key:
             return
         self._close_file()
-        self._current_period = key
-        fname = f"alicat_{self._safe_name}_{key}.csv"
+        fname = f"{self._safe_name}_{self._safe_serial}_{self._safe_ep_name}_{key}.csv"
         path = os.path.join(self.data_dir, fname)
         is_new = not os.path.exists(path)
-        self._file = open(path, 'a', newline='')
+        self._file = open(path, 'a', newline='')   # may raise; _current_period unchanged
         self._writer = csv.DictWriter(self._file, fieldnames=self.FIELDNAMES)
+        self._current_period = key   # only committed after open() succeeds
         if is_new:
             self._writer.writeheader()
             self._write_metadata_txt(path)
@@ -132,6 +143,7 @@ class RawDataLogger:
         txt_path = os.path.splitext(csv_path)[0] + '.txt'
         now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         meta = self._device_meta
+        ep = meta.get('ep_info') or {}
         lines = [
             '=== ExxonController Flow Controller Metadata ===',
             f'Device Name:   {self.device_name}',
@@ -143,6 +155,14 @@ class RawDataLogger:
             f'Altitude:      {meta.get("alt", "")} m',
             f'File Created:  {now}',
             f'Rotation:      {self.rotation_minutes} min',
+            '',
+            '=== Emission Point ===',
+            f'EP Name:        {ep.get("display_name", "")}',
+            f'EP Description: {ep.get("description", "")}',
+            f'EP Latitude:    {ep.get("lat", "")} deg',
+            f'EP Longitude:   {ep.get("lon", "")} deg',
+            f'EP Altitude:    {ep.get("alt", "")} m',
+            f'EP Install Date:{ep.get("install_datetime", "")}',
             '',
             '=== Column Descriptions ===',
         ] + [f'  {col}: {_ALICAT_FIELD_DESCRIPTIONS.get(col, col)}'
@@ -242,6 +262,24 @@ class ExperimentDataLogger:
 
     def _write_metadata_txt(self, experiment_meta, devices_info, start_time):
         txt_path = os.path.join(self.data_dir, 'metadata.txt')
+        device_lines = []
+        for name, info in devices_info.items():
+            device_lines.append(
+                f'  {name}: {info.get("device_type", "")} @ {info.get("host", "")}'
+                f' | Serial: {info.get("serial_number", "")}'
+                f' | Gas: {info.get("gas_number", "")}'
+            )
+            ep = info.get('ep_info') or {}
+            if ep:
+                device_lines.append(
+                    f'    EP: {ep.get("display_name", "")} — {ep.get("description", "")}'
+                )
+                device_lines.append(
+                    f'    EP Lat/Lon/Alt: {ep.get("lat", "")} / {ep.get("lon", "")} / {ep.get("alt", "")} m'
+                )
+                device_lines.append(
+                    f'    EP Install Date: {ep.get("install_datetime", "")}'
+                )
         lines = [
             '=== ExxonController Experiment Metadata ===',
             f'Experiment:  {experiment_meta.get("name", "")}',
@@ -251,8 +289,7 @@ class ExperimentDataLogger:
             f'Start Time:  {start_time}',
             '',
             '=== Devices ===',
-        ] + [f'  {name}: {info.get("device_type", "")} @ {info.get("host", "")}'
-             for name, info in devices_info.items()] + [
+        ] + device_lines + [
             '',
             '=== Column Descriptions ===',
         ] + [f'  {col}: {_ALICAT_FIELD_DESCRIPTIONS.get(col, col)}'
@@ -369,12 +406,12 @@ class PeripheralDataLogger:
         if self._current_day == key:
             return
         self._close_file()
-        self._current_day = key
         fname = f"peripheral_{self._safe_name}_{key}.csv"
         path = os.path.join(self.data_dir, fname)
         is_new = not os.path.exists(path)
-        self._file = open(path, 'a', newline='')
+        self._file = open(path, 'a', newline='')   # may raise; _current_day unchanged
         self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
+        self._current_day = key   # only committed after open() succeeds
         if is_new:
             self._writer.writeheader()
             self._write_metadata_txt(path)

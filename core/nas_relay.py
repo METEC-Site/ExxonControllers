@@ -140,19 +140,25 @@ class NasRelay:
             self._probe_ok = None
             self._probe_ts = 0.0
 
-    def write_reading(self, device_name: str, reading: dict, subdir: str | None = None):
+    def write_reading(self, device_name: str, reading: dict, subdir: str | None = None,
+                      serial: str = '', ep_name: str = '', meta: dict | None = None):
         """Append one reading row. Called from poll loop — must be fast.
 
-        subdir : optional subdirectory under self._path (e.g. 'Experiments/MyExp_20260325').
-                 Used to mirror experiment data into a separate folder on the NAS.
+        subdir   : optional subdirectory under self._path (e.g. 'Experiments/MyExp_20260325').
+                   Used to mirror experiment data into a separate folder on the NAS.
+        serial   : device serial number — embedded in the CSV filename.
+        ep_name  : emission point display name — embedded in the CSV filename.
+        meta     : dict of metadata to write alongside a new CSV file (written once).
         """
         if not self._enabled or not self._path:
             return
         safe_name = device_name.replace(' ', '_').replace('/', '-').replace('\\', '-')
+        safe_serial = (serial or 'NoSerial').replace(' ', '_').replace('/', '-')
+        safe_ep = (ep_name or 'TEST').replace(' ', '_').replace('/', '-')
         now = datetime.now(timezone.utc)
         date_str = now.strftime('%Y-%m-%d')
         subdir_key = subdir or ''
-        file_key = f'{subdir_key}|{safe_name}_{date_str}'
+        file_key = f'{subdir_key}|{safe_name}_{safe_serial}_{safe_ep}_{date_str}'
         ts = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
         row_values = []
@@ -169,7 +175,8 @@ class NasRelay:
         with self._lock:
             if not self._enabled:
                 return
-            writer, needs_header = self._get_writer(file_key, safe_name, date_str, subdir)
+            writer, needs_header, new_file_path = self._get_writer(
+                file_key, safe_name, safe_serial, safe_ep, date_str, subdir)
             if writer is None:
                 return
             if needs_header:
@@ -186,6 +193,11 @@ class NasRelay:
                 except OSError:
                     pass
                 del self._open_files[file_key]
+                return
+
+        # Write metadata sidecar outside the lock (file I/O, not performance-critical)
+        if needs_header and new_file_path:
+            self._write_metadata_txt(new_file_path, device_name, serial, ep_name, meta or {})
 
     def _check_accessible(self) -> bool | None:
         """Probe-write the NAS path. Returns True/False; None if not enabled.
@@ -219,27 +231,68 @@ class NasRelay:
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
-    def _get_writer(self, file_key: str, safe_name: str, date_str: str,
-                    subdir: str | None = None):
-        """Return (writer, needs_header). Caller must hold self._lock."""
+    def _get_writer(self, file_key: str, safe_name: str, safe_serial: str,
+                    safe_ep: str, date_str: str, subdir: str | None = None):
+        """Return (writer, needs_header, file_path_if_new). Caller must hold self._lock."""
         if file_key in self._open_files:
-            return self._open_files[file_key][1], False
+            return self._open_files[file_key][1], False, None
 
         base_path = os.path.join(self._path, subdir) if subdir else self._path
         try:
             os.makedirs(base_path, exist_ok=True)
         except OSError:
-            return None, False
+            return None, False, None
 
-        file_path = os.path.join(base_path, f'{safe_name}_{date_str}.csv')
+        file_path = os.path.join(
+            base_path, f'{safe_name}_{safe_serial}_{safe_ep}_{date_str}.csv')
         needs_header = not os.path.exists(file_path)
         try:
             fh = open(file_path, 'a', newline='', encoding='utf-8')
             writer = csv.writer(fh)
             self._open_files[file_key] = (fh, writer)
-            return writer, needs_header
+            return writer, needs_header, (file_path if needs_header else None)
         except OSError:
-            return None, False
+            return None, False, None
+
+    def _write_metadata_txt(self, csv_path: str, device_name: str,
+                             serial: str, ep_name: str, meta: dict):
+        """Write a human-readable .txt sidecar alongside a newly created NAS CSV."""
+        txt_path = os.path.splitext(csv_path)[0] + '.txt'
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        ep = meta.get('ep_info') or {}
+        lines = [
+            '=== ExxonController NAS Echo Metadata ===',
+            f'Device Name:   {device_name}',
+            f'Device Type:   {meta.get("device_type", "")}',
+            f'Serial Number: {serial}',
+            f'Latitude:      {meta.get("lat", "")} deg',
+            f'Longitude:     {meta.get("lon", "")} deg',
+            f'Altitude:      {meta.get("alt", "")} m',
+            f'File Created:  {now}',
+            '',
+            '=== Emission Point ===',
+            f'EP Name:        {ep.get("display_name", ep_name)}',
+            f'EP Description: {ep.get("description", "")}',
+            f'EP Latitude:    {ep.get("lat", "")} deg',
+            f'EP Longitude:   {ep.get("lon", "")} deg',
+            f'EP Altitude:    {ep.get("alt", "")} m',
+            f'EP Install Date:{ep.get("install_datetime", "")}',
+            '',
+            '=== Column Descriptions ===',
+            '  timestamp_utc: Timestamp (UTC, ISO 8601)',
+            '  device_name: Device name',
+            '  pressure_psia: Inlet gas pressure (PSIA)',
+            '  temperature_c: Gas temperature (°C)',
+            '  vol_flow_slpm: Volumetric flow rate (SLPM)',
+            '  mass_flow_slpm: Mass flow rate (SLPM)',
+            '  setpoint_slpm: Flow setpoint (SLPM)',
+            '  accumulated_sl: Accumulated volume (SL)',
+        ]
+        try:
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except OSError:
+            pass
 
     def _close_all(self):
         """Close all open file handles. Caller must hold self._lock."""

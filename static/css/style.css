@@ -407,6 +407,55 @@ body {
 .badge-connected    { background: rgba(63,185,80,0.15); color: var(--success); }
 .badge-disconnected { background: rgba(248,81,73,0.15); color: var(--danger);  }
 .badge-logging      { background: rgba(88,166,255,0.15); color: var(--accent); }
+.badge-ep-test      { background: rgba(158,106,3,0.20);  color: #d29922; }
+
+/* ── Emission Point Cards ──────────────────────────────────────────────────── */
+.ep-card {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-left: 3px solid #238636;
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  margin-bottom: 0.5rem;
+  transition: border-color 0.2s;
+}
+.ep-card.ep-test {
+  border-left-color: #6e7681;
+  opacity: 0.85;
+}
+.ep-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+.ep-photo-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.ep-name {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+.ep-desc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+.ep-coords {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: monospace;
+  margin-top: 0.1rem;
+}
 
 /* Reading Grid */
 .readings-grid {

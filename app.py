@@ -24,6 +24,7 @@ import os
 import requests as _requests
 import shutil
 import signal
+import socket as _socket
 import sys
 import threading
 import time
@@ -36,6 +37,7 @@ from flask import Flask, redirect, render_template, request, session, url_for, j
 from flask_socketio import SocketIO, disconnect, emit
 
 from core.device_manager import DeviceManager
+from core.emission_point_manager import EmissionPointManager, TEST_EP_ID
 from core.experiment_manager import ExperimentManager
 from core.mqtt_relay import MqttRelay
 from core.nas_relay import NasRelay
@@ -62,6 +64,7 @@ except NameError:
 CONFIG_DIR = os.path.join(BASE_DIR, 'config')
 DATA_DIR = os.path.join(BASE_DIR, 'Data')
 MAP_UPLOADS_DIR = os.path.join(BASE_DIR, 'static', 'map_uploads')
+EP_PHOTOS_DIR = os.path.join(BASE_DIR, 'static', 'ep_photos')
 TILE_CACHE_DIR = os.path.join(BASE_DIR, 'tile_cache')
 
 # First-run seed: if no config/ exists beside the exe, copy bundled defaults.
@@ -75,6 +78,7 @@ if _BUNDLE_DIR and not os.path.exists(CONFIG_DIR):
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MAP_UPLOADS_DIR, exist_ok=True)
+os.makedirs(EP_PHOTOS_DIR, exist_ok=True)
 os.makedirs(TILE_CACHE_DIR, exist_ok=True)
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
@@ -157,6 +161,9 @@ def _install_gevent_error_handler():
 
 
 device_mgr = DeviceManager(state, socketio)
+ep_mgr = EmissionPointManager()
+ep_mgr.load_from_config(state.get_emission_points())
+device_mgr.set_ep_mgr(ep_mgr)
 experiment_mgr = ExperimentManager(CONFIG_DIR, DATA_DIR)
 mqtt_relay = MqttRelay()
 nas_relay = NasRelay()
@@ -374,6 +381,16 @@ def on_clear_chat():
 @socketio.on('add_device')
 @ws_login_required
 def on_add_device(data):
+    # Resolve emission point and inject lat/lon/alt from EP
+    ep_id = data.get('emission_point_id') or TEST_EP_ID
+    ep = ep_mgr.get_ep(ep_id)
+    if not ep:
+        emit('action_result', {'success': False, 'error': 'Selected emission point not found'})
+        return
+    data['emission_point_id'] = ep_id
+    data['lat'] = ep['lat']
+    data['lon'] = ep['lon']
+    data['alt'] = ep.get('alt')
     result = device_mgr.add_device(data)
     if result['success']:
         state.save_devices(device_mgr.get_device_configs())
@@ -396,6 +413,17 @@ def on_remove_device(data):
 @ws_login_required
 def on_edit_device(data):
     device_id = data.get('device_id', '')
+    # If EP assignment is changing, inject updated lat/lon/alt from new EP
+    if 'emission_point_id' in data:
+        ep_id = data['emission_point_id'] or TEST_EP_ID
+        ep = ep_mgr.get_ep(ep_id)
+        if not ep:
+            emit('action_result', {'success': False, 'error': 'Selected emission point not found'})
+            return
+        data['emission_point_id'] = ep_id
+        data['lat'] = ep['lat']
+        data['lon'] = ep['lon']
+        data['alt'] = ep.get('alt')
     result = device_mgr.edit_device(device_id, data)
     if result['success']:
         state.save_devices(device_mgr.get_device_configs())
@@ -583,6 +611,250 @@ def on_set_relay(data):
     else:
         _emit_log(f"[Relay] {session.get('username','?')} → {pname} / {ch_label}: FAILED — {result.get('error','')}", 'error')
     emit('action_result', result)
+
+
+# ── Emission Point Events ─────────────────────────────────────────────────────
+
+@socketio.on('add_emission_point')
+@ws_login_required
+def on_add_emission_point(data):
+    result = ep_mgr.add_ep(data)
+    if result['success']:
+        state.save_emission_points(ep_mgr.get_configs())
+        socketio.emit('full_state', _build_full_state())
+    emit('action_result', result)
+
+
+@socketio.on('edit_emission_point')
+@ws_login_required
+def on_edit_emission_point(data):
+    ep_id = data.get('ep_id', '')
+    result = ep_mgr.edit_ep(ep_id, data)
+    if result['success']:
+        updated_ep = result['ep']
+        # Cascade updated lat/lon/alt to all devices assigned to this EP
+        for device in device_mgr._alicat.values():
+            if getattr(device, 'emission_point_id', None) == ep_id:
+                device.lat = updated_ep['lat']
+                device.lon = updated_ep['lon']
+                device.alt = updated_ep.get('alt')
+        state.save_devices(device_mgr.get_device_configs())
+        state.save_emission_points(ep_mgr.get_configs())
+        socketio.emit('full_state', _build_full_state())
+    emit('action_result', result)
+
+
+@socketio.on('delete_emission_point')
+@ws_login_required
+def on_delete_emission_point(data):
+    ep_id = data.get('ep_id', '')
+    result = ep_mgr.delete_ep(ep_id)
+    if result['success']:
+        # Cascade: reassign all devices using this EP back to TEST
+        test_ep = ep_mgr.get_ep(TEST_EP_ID)
+        affected = []
+        for device in device_mgr._alicat.values():
+            if getattr(device, 'emission_point_id', None) == ep_id:
+                device.emission_point_id = TEST_EP_ID
+                device.lat = test_ep['lat']
+                device.lon = test_ep['lon']
+                device.alt = test_ep.get('alt')
+                affected.append(device.device_name)
+        state.save_devices(device_mgr.get_device_configs())
+        state.save_emission_points(ep_mgr.get_configs())
+        socketio.emit('full_state', _build_full_state())
+        if affected:
+            result['warning'] = (
+                f"{len(affected)} device(s) reassigned to DEFAULT: {', '.join(affected)}. "
+                "Update their emission point assignment before use."
+            )
+    emit('action_result', result)
+
+
+@socketio.on('reorder_emission_points')
+@ws_login_required
+def on_reorder_emission_points(data):
+    result = ep_mgr.reorder_eps(data.get('order', []))
+    if result['success']:
+        state.save_emission_points(ep_mgr.get_configs())
+    emit('action_result', result)
+
+
+@socketio.on('query_rtk_location')
+@ws_login_required
+def on_query_rtk_location(data):
+    """
+    Query a SparkFun RTK Postcard (or compatible device) for its current location.
+    The device must be actively broadcasting UDP NMEA packets on port 13521.
+    Listens for up to 2 seconds for a GGA sentence from the specified IP.
+    Returns lat/lon/altitude and RTK fix quality.
+    """
+    ip = (data.get('ip') or '').strip()
+    if not ip:
+        emit('rtk_location_result', {'success': False, 'error': 'IP address is required'})
+        return
+
+    RTK_PORT = 13521
+    TIMEOUT_S = 2.0
+
+    def _parse_nmea_coord(value: str, hemisphere: str) -> float | None:
+        """Convert NMEA DDMM.MMMM format to decimal degrees."""
+        try:
+            value = value.strip()
+            if not value:
+                return None
+            # Find decimal point position to split degrees from minutes
+            dot_idx = value.index('.')
+            # Degrees are all digits before the last 2 digits left of the decimal
+            deg_digits = dot_idx - 2
+            degrees = float(value[:deg_digits])
+            minutes = float(value[deg_digits:])
+            dec = degrees + minutes / 60.0
+            if hemisphere.strip().upper() in ('S', 'W'):
+                dec = -dec
+            return dec
+        except (ValueError, IndexError):
+            return None
+
+    _FIX_LABELS = {
+        0: 'No fix',
+        1: 'GPS fix (SPS)',
+        2: 'DGPS fix',
+        3: 'PPS fix',
+        4: 'RTK Fixed',
+        5: 'RTK Float',
+        6: 'Estimated',
+        7: 'Manual input',
+        8: 'Simulation',
+    }
+
+    try:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('0.0.0.0', RTK_PORT))
+        except OSError as bind_err:
+            emit('rtk_location_result', {
+                'success': False,
+                'error': f'Cannot bind to UDP port {RTK_PORT}: {bind_err}. '
+                         'Ensure no other application is using this port.',
+            })
+            sock.close()
+            return
+
+        sock.settimeout(TIMEOUT_S)
+        deadline = time.monotonic() + TIMEOUT_S
+
+        result = None
+        while time.monotonic() < deadline:
+            try:
+                raw, addr = sock.recvfrom(4096)
+            except _socket.timeout:
+                break
+            except OSError:
+                break
+
+            if addr[0] != ip:
+                continue  # packet from a different host
+
+            # The payload may contain multiple NMEA sentences (newline-separated)
+            try:
+                text = raw.decode('ascii', errors='ignore')
+            except Exception:
+                continue
+
+            for line in text.splitlines():
+                line = line.strip()
+                # Accept any GGA talker: $GNGGA, $GPGGA, $GLGGA, $GBGGA ...
+                if not line or '$' not in line:
+                    continue
+                try:
+                    start = line.index('$')
+                    sentence = line[start:]
+                    # Strip checksum if present
+                    if '*' in sentence:
+                        sentence = sentence[:sentence.index('*')]
+                    fields = sentence.split(',')
+                    if len(fields) < 10:
+                        continue
+                    talker_msg = fields[0][1:]  # e.g. GNGGA, GPGGA
+                    if not talker_msg.endswith('GGA'):
+                        continue
+
+                    lat = _parse_nmea_coord(fields[2], fields[3])
+                    lon = _parse_nmea_coord(fields[4], fields[5])
+                    fix_quality = int(fields[6]) if fields[6].strip() else 0
+                    alt_str = fields[9].strip()
+                    alt = float(alt_str) if alt_str else None
+
+                    if lat is None or lon is None:
+                        continue
+
+                    result = {
+                        'success': True,
+                        'lat': round(lat, 8),
+                        'lon': round(lon, 8),
+                        'alt': round(alt, 2) if alt is not None else None,
+                        'fix_quality': fix_quality,
+                        'fix_label': _FIX_LABELS.get(fix_quality, f'Quality {fix_quality}'),
+                        'rtk_fixed': fix_quality == 4,
+                        'rtk_float': fix_quality == 5,
+                    }
+                    break  # got a valid GGA — done
+                except (ValueError, IndexError):
+                    continue
+
+            if result:
+                break
+    except Exception as exc:
+        emit('rtk_location_result', {'success': False, 'error': str(exc)})
+        return
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    if result:
+        emit('rtk_location_result', result)
+    else:
+        emit('rtk_location_result', {
+            'success': False,
+            'error': f'No GGA response from {ip} within {TIMEOUT_S:.0f}s. '
+                     'Verify the IP address and that the RTK device is powered and broadcasting.',
+        })
+
+
+@app.route('/api/emission_points/upload_photo', methods=['POST'])
+@login_required
+def upload_ep_photo():
+    import uuid as _uuid
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'error': 'Empty filename'}), 400
+    allowed = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tif', '.tiff'}
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in allowed:
+        return jsonify({'error': f'File type {ext} not allowed'}), 400
+    safe_name = f"{_uuid.uuid4().hex[:8]}{ext}"
+    save_path = os.path.join(EP_PHOTOS_DIR, safe_name)
+    f.save(save_path)
+    return jsonify({'success': True, 'filename': safe_name})
+
+
+@app.route('/api/emission_points/delete_photo', methods=['POST'])
+@login_required
+def delete_ep_photo():
+    data = request.get_json() or {}
+    filename = os.path.basename(data.get('filename', ''))
+    if not filename:
+        return jsonify({'error': 'No filename'}), 400
+    path = os.path.join(EP_PHOTOS_DIR, filename)
+    if os.path.exists(path):
+        os.remove(path)
+    return jsonify({'success': True})
 
 
 # ── Crash Recovery Events ─────────────────────────────────────────────────────
@@ -1451,6 +1723,7 @@ def _build_full_state() -> dict:
     result: dict = {
         'devices': [],
         'peripherals': [],
+        'emission_points': [],
         'sessions': [],
         'chat_messages': recent_chat,
         'crash_info': None,
@@ -1464,6 +1737,10 @@ def _build_full_state() -> dict:
     }
 
     # Each block is independent — a failure in one must not affect the others.
+    try:
+        result['emission_points'] = ep_mgr.get_all_states()
+    except Exception as e:
+        print(f'[full_state] emission_points error: {e}', flush=True)
     try:
         result['devices'] = device_mgr.get_all_device_states()
     except Exception as e:
@@ -1560,10 +1837,25 @@ def _polling_loop():
                 for device_id, reading in readings.get('alicat', {}).items():
                     device = device_mgr._alicat.get(device_id)
                     if device:
-                        nas_relay.write_reading(device.device_name, reading)
+                        ep_id = getattr(device, 'emission_point_id', TEST_EP_ID)
+                        ep = ep_mgr.get_ep(ep_id) or {}
+                        _serial = getattr(device, 'serial_number', '') or ''
+                        _ep_name = ep.get('display_name', 'TEST')
+                        _nas_meta = {
+                            'device_type': device.device_type,
+                            'lat': device.lat if device.lat is not None else '',
+                            'lon': device.lon if device.lon is not None else '',
+                            'alt': device.alt if device.alt is not None else '',
+                            'ep_info': ep,
+                        }
+                        nas_relay.write_reading(device.device_name, reading,
+                                                serial=_serial, ep_name=_ep_name,
+                                                meta=_nas_meta)
                         if exp_subdir:
                             nas_relay.write_reading(device.device_name, reading,
-                                                    subdir=exp_subdir)
+                                                    subdir=exp_subdir,
+                                                    serial=_serial, ep_name=_ep_name,
+                                                    meta=_nas_meta)
 
             heartbeat_tick += 1
             if heartbeat_tick >= 5:
@@ -1596,6 +1888,11 @@ def _polling_loop():
         except Exception as e:
             print(f"[Polling] Error: {e}", flush=True)
             traceback.print_exc()
+        except BaseException as e:
+            # GreenletExit, KeyboardInterrupt, SystemExit — log and re-raise.
+            # These are fatal to this greenlet and must not be swallowed.
+            print(f"[Polling] Fatal {type(e).__name__} — polling loop is stopping.", flush=True)
+            raise
 
         elapsed = time.time() - loop_start
         _diag_cycle_times.append(elapsed)
@@ -1794,4 +2091,14 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT,  _graceful_shutdown)
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    socketio.run(app, host='0.0.0.0', port=52424, debug=False)
+    try:
+        socketio.run(app, host='0.0.0.0', port=52424, debug=False)
+    except SystemExit:
+        raise   # normal exit — let Python handle it
+    except BaseException as e:
+        print(f"[Fatal] socketio.run() raised {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        raise
+    else:
+        # socketio.run() should never return normally; if it does, we need to know.
+        print("[Fatal] socketio.run() returned without exception — server has stopped.", flush=True)

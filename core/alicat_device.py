@@ -214,7 +214,7 @@ class AlicatDevice:
 
     def __init__(self, host, port=502, unit_id=1, device_type='MCP',
                  device_name=None, max_flow=None, lat=None, lon=None, alt=None,
-                 expected_serial=None):
+                 expected_serial=None, emission_point_id='__test__'):
         self.host = host
         self.port = port
         self.unit_id = unit_id
@@ -225,9 +225,10 @@ class AlicatDevice:
         self.max_flow = self._max_flow_user  # effective max; updated after device read
         self.max_flow_reported = None        # as read from device registers
         self.max_flow_is_fallback = False    # True only when register read failed entirely
-        self.lat = lat            # Optional geotag latitude
-        self.lon = lon            # Optional geotag longitude
-        self.alt = alt            # Optional geotag altitude (metres)
+        self.emission_point_id = emission_point_id or '__test__'
+        self.lat = lat            # Cached from assigned emission point
+        self.lon = lon            # Cached from assigned emission point
+        self.alt = alt            # Cached from assigned emission point (metres)
         self.expected_serial = expected_serial or None  # None = not checked
 
         self.config = DEVICE_CONFIGS.get(self.device_type, DEVICE_CONFIGS['MCP'])
@@ -614,7 +615,8 @@ class AlicatDevice:
             'device_type': self.device_type,
             'device_name': self.device_name,
             'max_flow': self._max_flow_user,  # persist only the user-supplied cap (None = no cap)
-            'lat': self.lat,
+            'emission_point_id': self.emission_point_id,
+            'lat': self.lat,   # cached from emission point; kept for data logging
             'lon': self.lon,
             'alt': self.alt,
             'expected_serial': self.expected_serial,
@@ -630,6 +632,7 @@ class AlicatDevice:
             'max_flow_reported': self.max_flow_reported,
             'max_flow_user': self._max_flow_user,
             'max_flow_is_fallback': self.max_flow_is_fallback,
+            'emission_point_id': self.emission_point_id,
             'lat': self.lat,
             'lon': self.lon,
             'last_reading': self.last_reading,

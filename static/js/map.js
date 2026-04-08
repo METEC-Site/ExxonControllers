@@ -10,9 +10,11 @@ window.ecMap = (() => {
 
   // ── State ─────────────────────────────────────────────────────────────────
   let _map = null;
-  let _markers = {};        // deviceId -> L.marker
-  let _devices = {};        // deviceId -> device state dict (from app._devices)
+  let _epMarkers = {};      // epId -> L.marker  (one marker per emission point)
+  let _epData = {};         // epId -> EP state dict
+  let _devices = {};        // deviceId -> device state dict (used for popup readings)
   let _overlayLayers = {};  // overlayId -> L.imageOverlay
+  let _pendingFocusEpId = null;  // ep_id to focus when map becomes ready
   let _currentConfig = { overlays: [] };  // mirrors server's map_config.json
   let _initialized = false;
   let _saveViewTimer = null;
@@ -118,7 +120,7 @@ window.ecMap = (() => {
     _map.invalidateSize();
   }
 
-  // ── Device marker management ──────────────────────────────────────────────
+  // ── EP marker management ──────────────────────────────────────────────────
 
   function _makeIcon(color) {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="32" viewBox="0 0 24 32">
@@ -135,45 +137,80 @@ window.ecMap = (() => {
     });
   }
 
-  let _iconConnected, _iconDisconnected, _iconDisabled;
+  let _iconGreen, _iconRed;
 
-  function _getIcon(d) {
-    if (!_iconConnected) {
-      _iconConnected    = _makeIcon('#3fb950');
-      _iconDisconnected = _makeIcon('#ff7b72');
-      _iconDisabled     = _makeIcon('#8b949e');
+  function _ensureIcons() {
+    if (!_iconGreen) {
+      _iconGreen = _makeIcon('#3fb950');
+      _iconRed   = _makeIcon('#ff7b72');
     }
-    if (d.disabled) return _iconDisabled;
-    return d.connected ? _iconConnected : _iconDisconnected;
   }
 
-  function _buildPopupHtml(d) {
-    const gas = d.gas_number != null ? `Gas #${d.gas_number}` : '';
-    const reading = d.last_reading;
-    const mf  = reading?.mass_flow  != null ? `${Number(reading.mass_flow).toFixed(2)} SLPM` : '—';
-    const sp  = reading?.setpoint   != null ? `${Number(reading.setpoint).toFixed(2)} SLPM`  : '—';
-    const tmp = reading?.temperature != null ? `${Number(reading.temperature).toFixed(1)} °C` : '—';
-    const prs = reading?.pressure    != null ? `${Number(reading.pressure).toFixed(2)} psia`  : '—';
-    const statusBadge = d.disabled
-      ? `<span style="color:#8b949e">⊘ Disabled</span>`
-      : d.connected
-        ? `<span style="color:#3fb950">● Connected</span>`
-        : `<span style="color:#ff7b72">○ Disconnected</span>`;
+  function _getLinkedDevices(epId) {
+    return Object.values(_devices).filter(d => (d.emission_point_id || '__test__') === epId);
+  }
+
+  function _buildEpPopupHtml(ep) {
+    const linked = _getLinkedDevices(ep.ep_id);
+    const anyConnected = linked.some(d => !d.disabled && d.connected);
+
+    const statusBadge = anyConnected
+      ? `<span style="color:#3fb950">● Alicat Connected</span>`
+      : linked.length > 0
+        ? `<span style="color:#ff7b72">○ Alicat Offline</span>`
+        : `<span style="color:#8b949e">⊘ No Alicat Assigned</span>`;
+
+    const photoHtml = ep.photo_filename
+      ? `<div style="margin-bottom:6px"><img src="/static/ep_photos/${ep.photo_filename}"
+              style="width:100%;max-height:80px;object-fit:cover;border-radius:4px"></div>`
+      : '';
+
+    const lat = ep.lat != null ? ep.lat.toFixed(5) : '—';
+    const lon = ep.lon != null ? ep.lon.toFixed(5) : '—';
+    const alt = ep.alt != null ? `${Number(ep.alt).toFixed(1)} m` : '—';
+    const installed = ep.install_datetime ? ep.install_datetime.substring(0, 10) : '—';
+
+    const deviceRows = linked.map(d => {
+      const r = d.last_reading;
+      const mf  = r?.mass_flow   != null ? `${Number(r.mass_flow).toFixed(2)} SLPM`  : '—';
+      const sp  = r?.setpoint    != null ? `${Number(r.setpoint).toFixed(2)} SLPM`   : '—';
+      const tmp = r?.temperature != null ? `${Number(r.temperature).toFixed(1)} °C`  : '—';
+      const prs = r?.pressure    != null ? `${Number(r.pressure).toFixed(2)} psia`   : '—';
+      const dStatus = d.disabled
+        ? `<span style="color:#8b949e">⊘ Disabled</span>`
+        : d.connected
+          ? `<span style="color:#3fb950">● Connected</span>`
+          : `<span style="color:#ff7b72">○ Disconnected</span>`;
+      const snLine = d.serial_number
+        ? `<div style="color:#8b949e;font-size:0.76rem">S/N ${d.serial_number}${d.gas_number != null ? ' · Gas #' + d.gas_number : ''}</div>`
+        : '';
+      return `
+        <div style="margin-top:6px;padding-top:6px;border-top:1px solid #30363d">
+          <div style="font-weight:600;font-size:0.85rem">${d.device_name}&nbsp;${dStatus}</div>
+          ${snLine}
+          <table style="width:100%;border-collapse:collapse;margin-top:2px">
+            <tr><td style="color:#8b949e;padding-right:6px">Flow</td><td>${mf}</td></tr>
+            <tr><td style="color:#8b949e;padding-right:6px">Setpoint</td><td>${sp}</td></tr>
+            <tr><td style="color:#8b949e;padding-right:6px">Temp</td><td>${tmp}</td></tr>
+            <tr><td style="color:#8b949e;padding-right:6px">Pressure</td><td>${prs}</td></tr>
+          </table>
+        </div>`;
+    }).join('');
+
     return `
-      <div style="min-width:180px;font-family:monospace;font-size:0.82rem">
-        <div style="font-weight:700;font-size:0.95rem;margin-bottom:4px">${d.device_name}</div>
-        <div style="margin-bottom:4px">${statusBadge} &nbsp; ${gas}</div>
+      <div style="min-width:200px;font-family:monospace;font-size:0.82rem">
+        <div style="font-weight:700;font-size:0.95rem;margin-bottom:2px">${ep.display_name}</div>
+        <div style="color:#8b949e;font-size:0.78rem;margin-bottom:5px">${ep.description || ''}</div>
+        ${photoHtml}
+        <div style="margin-bottom:5px">${statusBadge}</div>
         <table style="width:100%;border-collapse:collapse">
-          <tr><td style="color:#8b949e;padding-right:6px">Mass Flow</td><td>${mf}</td></tr>
-          <tr><td style="color:#8b949e;padding-right:6px">Setpoint</td><td>${sp}</td></tr>
-          <tr><td style="color:#8b949e;padding-right:6px">Temp</td><td>${tmp}</td></tr>
-          <tr><td style="color:#8b949e;padding-right:6px">Pressure</td><td>${prs}</td></tr>
-          ${d.serial_number ? `<tr><td style="color:#8b949e;padding-right:6px">S/N</td><td>${d.serial_number}</td></tr>` : ''}
-          <tr><td style="color:#8b949e;padding-right:6px">Lat/Lon</td>
-              <td>${d.lat != null ? d.lat.toFixed(5) : '—'}, ${d.lon != null ? d.lon.toFixed(5) : '—'}</td></tr>
+          <tr><td style="color:#8b949e;padding-right:6px">Lat/Lon</td><td>${lat}, ${lon}</td></tr>
+          <tr><td style="color:#8b949e;padding-right:6px">Altitude</td><td>${alt}</td></tr>
+          <tr><td style="color:#8b949e;padding-right:6px">Installed</td><td>${installed}</td></tr>
         </table>
-        <div style="margin-top:6px;text-align:center">
-          <button onclick="ecMap.highlightDevice('${d.device_id}')"
+        ${deviceRows}
+        <div style="margin-top:7px;text-align:center">
+          <button onclick="ecMap.highlightEp('${ep.ep_id}')"
                   style="font-size:0.75rem;padding:2px 8px;cursor:pointer;
                          background:#1f6feb;border:none;color:#fff;border-radius:4px">
             Highlight in panel
@@ -182,78 +219,120 @@ window.ecMap = (() => {
       </div>`;
   }
 
-  function _placeOrUpdateMarker(d) {
+  function _placeOrUpdateEpMarker(ep) {
     if (!_map) return;
-    if (d.lat == null || d.lon == null) {
-      if (_markers[d.device_id]) {
-        _markers[d.device_id].remove();
-        delete _markers[d.device_id];
+    // TEST ep or no location → remove marker if present
+    if (ep.is_test || ep.lat == null || ep.lon == null) {
+      if (_epMarkers[ep.ep_id]) {
+        _epMarkers[ep.ep_id].remove();
+        delete _epMarkers[ep.ep_id];
       }
       return;
     }
 
-    const icon = _getIcon(d);
-    if (_markers[d.device_id]) {
-      _markers[d.device_id]
-        .setLatLng([d.lat, d.lon])
+    _ensureIcons();
+    const linked = _getLinkedDevices(ep.ep_id);
+    const anyConnected = linked.some(d => !d.disabled && d.connected);
+    const icon = anyConnected ? _iconGreen : _iconRed;
+
+    if (_epMarkers[ep.ep_id]) {
+      _epMarkers[ep.ep_id]
+        .setLatLng([ep.lat, ep.lon])
         .setIcon(icon)
-        .getPopup()?.setContent(_buildPopupHtml(d));
+        .getPopup()?.setContent(_buildEpPopupHtml(ep));
     } else {
-      const marker = L.marker([d.lat, d.lon], { icon })
-        .bindPopup(_buildPopupHtml(d), { maxWidth: 240 })
+      const marker = L.marker([ep.lat, ep.lon], { icon })
+        .bindPopup(_buildEpPopupHtml(ep), { maxWidth: 280 })
         .addTo(_map);
 
       marker.on('click', () => {
-        highlightDevice(d.device_id);
+        highlightEp(ep.ep_id);
         marker.openPopup();
       });
 
-      _markers[d.device_id] = marker;
+      _epMarkers[ep.ep_id] = marker;
     }
 
-    // Pulse the icon slowly when this device has an active setpoint (> 0 SLPM)
-    const el = _markers[d.device_id].getElement();
+    // Pulse the pin when this EP has an actively-flowing Alicat
+    const el = _epMarkers[ep.ep_id].getElement();
     if (el) {
-      const isFlowing = !d.disabled && d.connected && (d.last_reading?.setpoint ?? 0) > 0;
+      const isFlowing = linked.some(
+        d => !d.disabled && d.connected && (d.last_reading?.setpoint ?? 0) > 0
+      );
       el.classList.toggle('marker-active-flow', isFlowing);
     }
   }
 
-  function _removeMarker(deviceId) {
-    if (_markers[deviceId]) {
-      _markers[deviceId].remove();
-      delete _markers[deviceId];
+  function _removeEpMarker(epId) {
+    if (_epMarkers[epId]) {
+      _epMarkers[epId].remove();
+      delete _epMarkers[epId];
     }
   }
 
-  // ── Public: update map from a full device list ────────────────────────────
+  // ── Public: update map from a full EP list ────────────────────────────────
+  function updateEmissionPoints(epList) {
+    const incoming = {};
+    (epList || []).forEach(ep => { incoming[ep.ep_id] = ep; });
+    // Remove markers for EPs no longer present
+    Object.keys(_epMarkers).forEach(id => { if (!incoming[id]) _removeEpMarker(id); });
+    _epData = incoming;
+    if (_initialized) Object.values(_epData).forEach(ep => _placeOrUpdateEpMarker(ep));
+  }
+
+  function _redrawAllEpMarkers() {
+    Object.keys(_epMarkers).forEach(id => { if (!_epData[id]) _removeEpMarker(id); });
+    Object.values(_epData).forEach(ep => _placeOrUpdateEpMarker(ep));
+  }
+
+  // ── Public: update map from full device list (affects EP marker colors) ──
   function updateDevices(deviceList) {
     _devices = {};
     (deviceList || []).forEach(d => { _devices[d.device_id] = d; });
-    if (_initialized) _redrawAllMarkers();
+    if (_initialized) _redrawAllEpMarkers();
   }
 
-  function _redrawAllMarkers() {
-    Object.keys(_markers).forEach(id => {
-      if (!_devices[id]) _removeMarker(id);
-    });
-    Object.values(_devices).forEach(d => _placeOrUpdateMarker(d));
-  }
-
-  // ── Public: update a single device (from device_update event) ────────────
+  // ── Public: update a single device (live reading / connection change) ─────
   function updateDevice(d) {
     if (!_initialized) return;
     _devices[d.device_id] = d;
-    if (d.lat == null || d.lon == null) {
-      _removeMarker(d.device_id);
+    // Refresh the EP marker this device is assigned to
+    const epId = d.emission_point_id || '__test__';
+    const ep = _epData[epId];
+    if (ep) _placeOrUpdateEpMarker(ep);
+  }
+
+  // ── Public: focus map on a specific EP (pan + open popup) ────────────────
+  function focusEp(epId) {
+    if (!_initialized || !_map) {
+      _pendingFocusEpId = epId;
+      return;
+    }
+    const marker = _epMarkers[epId];
+    if (marker) {
+      _map.setView(marker.getLatLng(), Math.max(_map.getZoom(), 18));
+      setTimeout(() => marker.openPopup(), 200);
     } else {
-      _placeOrUpdateMarker(d);
-      const m = _markers[d.device_id];
-      if (m && m.isPopupOpen()) m.setPopupContent(_buildPopupHtml(d));
+      const ep = _epData[epId];
+      if (ep && ep.lat != null) _map.setView([ep.lat, ep.lon], 18);
+      _pendingFocusEpId = epId;
     }
   }
 
-  // ── Public: highlight a device card in the sidebar ───────────────────────
+  // ── Public: highlight an EP card in the sidebar ───────────────────────────
+  function highlightEp(epId) {
+    document.querySelectorAll('.ep-card.map-highlight').forEach(el => {
+      el.classList.remove('map-highlight');
+    });
+    const card = document.getElementById(`ep-card-${epId}`);
+    if (card) {
+      card.classList.add('map-highlight');
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      setTimeout(() => card.classList.remove('map-highlight'), 3000);
+    }
+  }
+
+  // ── Public: legacy device highlight (kept for backward compat) ───────────
   function highlightDevice(deviceId) {
     document.querySelectorAll('.device-card.map-highlight').forEach(el => {
       el.classList.remove('map-highlight');
@@ -266,10 +345,10 @@ window.ecMap = (() => {
     }
   }
 
-  // ── Public: fit map to current markers ───────────────────────────────────
+  // ── Public: fit map to current EP markers ────────────────────────────────
   function fitToMarkers() {
     if (!_map) return;
-    const coords = Object.values(_markers).map(m => m.getLatLng());
+    const coords = Object.values(_epMarkers).map(m => m.getLatLng());
     if (coords.length === 0) return;
     if (coords.length === 1) {
       _map.setView(coords[0], 16);
@@ -841,10 +920,16 @@ window.ecMap = (() => {
       // Fetch saved center/zoom before creating the map so we restore the view
       await _fetchConfig();
       _init();
-      _redrawAllMarkers();
+      _redrawAllEpMarkers();
     }
     // Always invalidate: the container may have been zero-size while hidden
     if (_map) setTimeout(() => _map.invalidateSize(), 50);
+    // Apply any pending EP focus (set before map was initialized or visible)
+    if (_pendingFocusEpId) {
+      const id = _pendingFocusEpId;
+      _pendingFocusEpId = null;
+      setTimeout(() => focusEp(id), 150);
+    }
   }
 
   // ── Wire socket listeners after scripts load ──────────────────────────────
@@ -858,9 +943,12 @@ window.ecMap = (() => {
   // ── Public API ────────────────────────────────────────────────────────────
   return {
     onTabShow,
+    updateEmissionPoints,
     updateDevices,
     updateDevice,
+    highlightEp,
     highlightDevice,
+    focusEp,
     fitToMarkers,
     openOverlayManager,
     addOverlay,
