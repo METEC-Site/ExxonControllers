@@ -224,6 +224,15 @@ def clear_solenoid_checklist() -> bool:
     return True
 
 
+def clear_emission_points() -> bool:
+    path = "config/emission_points.json"
+    if not os.path.isfile(path):
+        return False
+    with open(path, "w") as f:
+        json.dump({"emission_points": {}, "ep_order": []}, f, indent=2)
+    return True
+
+
 def clear_completed_runs() -> int:
     runs_dir = os.path.join("Data", "Experiments")
     if not os.path.isdir(runs_dir):
@@ -282,6 +291,7 @@ def main():
     clear_periphs  = ask_yn("Clear all peripherals (Phidgets, etc.)?")
     clear_exps     = ask_yn("Clear all experiments?")
     clear_checklist = ask_yn("Clear the experiment pre-run checklist?")
+    clear_eps      = ask_yn("Clear all emission points? (DEFAULT is always preserved)")
     clear_runs     = ask_yn("Clear all completed runs (Data/Experiments/)?")
 
 
@@ -310,6 +320,10 @@ def main():
     if clear_checklist:
         if clear_solenoid_checklist():
             print("  [clear] solenoid_checklist.json")
+
+    if clear_eps:
+        if clear_emission_points():
+            print("  [clear] emission_points.json (DEFAULT preserved — injected at runtime)")
 
     if clear_runs:
         n = clear_completed_runs()
