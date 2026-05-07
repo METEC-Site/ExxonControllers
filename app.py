@@ -685,8 +685,8 @@ def on_reorder_emission_points(data):
 def on_query_rtk_location(data):
     """
     Query a SparkFun RTK Postcard (or compatible device) for its current location.
-    The device must be actively broadcasting UDP NMEA packets on port 13521.
-    Listens for up to 2 seconds for a GGA sentence from the specified IP.
+    Connects to the device's TCP NMEA server on port 13520 and reads until a
+    GGA sentence is received or the timeout elapses.
     Returns lat/lon/altitude and RTK fix quality.
     """
     ip = (data.get('ip') or '').strip()
@@ -694,7 +694,7 @@ def on_query_rtk_location(data):
         emit('rtk_location_result', {'success': False, 'error': 'IP address is required'})
         return
 
-    RTK_PORT = 13521
+    RTK_PORT = 13520
     TIMEOUT_S = 2.0
 
     def _parse_nmea_coord(value: str, hemisphere: str) -> float | None:
@@ -729,37 +729,51 @@ def on_query_rtk_location(data):
     }
 
     try:
-        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.settimeout(TIMEOUT_S)
         try:
-            sock.bind(('0.0.0.0', RTK_PORT))
-        except OSError as bind_err:
+            sock.connect((ip, RTK_PORT))
+        except ConnectionRefusedError:
             emit('rtk_location_result', {
                 'success': False,
-                'error': f'Cannot bind to UDP port {RTK_PORT}: {bind_err}. '
-                         'Ensure no other application is using this port.',
+                'error': f'TCP connection refused by {ip}:{RTK_PORT}. '
+                         'Ensure the RTK device has TCP NMEA output enabled on this port.',
+            })
+            sock.close()
+            return
+        except _socket.timeout:
+            emit('rtk_location_result', {
+                'success': False,
+                'error': f'TCP connection to {ip}:{RTK_PORT} timed out. '
+                         'Verify the IP address and that the RTK device is powered and reachable.',
             })
             sock.close()
             return
 
-        sock.settimeout(TIMEOUT_S)
         deadline = time.monotonic() + TIMEOUT_S
-
         result = None
+        stream_buf = b''
+
         while time.monotonic() < deadline:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
             try:
-                raw, addr = sock.recvfrom(4096)
+                chunk = sock.recv(4096)
             except _socket.timeout:
                 break
             except OSError:
                 break
 
-            if addr[0] != ip:
-                continue  # packet from a different host
+            if not chunk:
+                break  # connection closed by device
 
-            # The payload may contain multiple NMEA sentences (newline-separated)
+            stream_buf += chunk
+            # Hold back anything after the last newline (may be a partial line)
+            lines_raw, _, stream_buf = stream_buf.rpartition(b'\n')
+            if not lines_raw:
+                continue
+
             try:
-                text = raw.decode('ascii', errors='ignore')
+                text = lines_raw.decode('ascii', errors='ignore')
             except Exception:
                 continue
 
@@ -821,7 +835,7 @@ def on_query_rtk_location(data):
         emit('rtk_location_result', {
             'success': False,
             'error': f'No GGA response from {ip} within {TIMEOUT_S:.0f}s. '
-                     'Verify the IP address and that the RTK device is powered and broadcasting.',
+                     'Verify the IP address and that the RTK device is powered and streaming.',
         })
 
 
