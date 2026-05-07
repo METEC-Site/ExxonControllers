@@ -26,8 +26,24 @@ TEST_EP = {
     'alt': 0.0,
     'install_datetime': '2000-01-01T00:00:00',
     'photo_filename': None,
+    'temperature_source': None,
     'is_test': True,
 }
+
+
+def _parse_temperature_source(raw) -> dict | None:
+    """Normalise a temperature_source value from config or a socket payload.
+    Returns {'peripheral_id': str, 'channel': int} or None."""
+    if not raw:
+        return None
+    try:
+        pid = str(raw['peripheral_id']).strip()
+        ch  = int(raw['channel'])
+        if not pid:
+            return None
+        return {'peripheral_id': pid, 'channel': ch}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 class EmissionPointManager:
@@ -119,6 +135,8 @@ class EmissionPointManager:
                 if ep['base_name'].lower() == base_name.lower():
                     return {'success': False, 'error': f"An emission point named '{base_name}' already exists"}
 
+        temp_source = _parse_temperature_source(config.get('temperature_source'))
+
         ep_id = str(uuid.uuid4())[:8]
         ep_data = {
             'base_name': base_name,
@@ -130,6 +148,7 @@ class EmissionPointManager:
             'alt': alt,
             'install_datetime': install_datetime,
             'photo_filename': config.get('photo_filename') or None,
+            'temperature_source': temp_source,
         }
         with self._lock:
             self._eps[ep_id] = ep_data
@@ -178,6 +197,13 @@ class EmissionPointManager:
             new_display = f"{ep['base_name']}_{new_version}"
             photo_filename = config.get('photo_filename', ep.get('photo_filename'))
 
+            # 'temperature_source' key present in config means the caller intends to
+            # set it (including to None to clear it). Absent key = leave unchanged.
+            if 'temperature_source' in config:
+                temp_source = _parse_temperature_source(config['temperature_source'])
+            else:
+                temp_source = ep.get('temperature_source')
+
             ep.update({
                 'version': new_version,
                 'display_name': new_display,
@@ -187,6 +213,7 @@ class EmissionPointManager:
                 'alt': alt,
                 'install_datetime': install_datetime,
                 'photo_filename': photo_filename or None,
+                'temperature_source': temp_source,
             })
 
             result_ep = dict(ep)
@@ -212,3 +239,27 @@ class EmissionPointManager:
             remaining = [x for x in self._ep_order if x not in valid]
             self._ep_order = valid + remaining
         return {'success': True}
+
+    def find_temperature_source_conflict(
+        self, peripheral_id: str, channel: int, exclude_ep_id: str | None = None
+    ) -> dict | None:
+        """Return the EP (with ep_id) that already claims this peripheral+channel,
+        or None if it is free. Pass exclude_ep_id to ignore the EP being edited."""
+        with self._lock:
+            for ep_id, ep in self._eps.items():
+                if ep_id == exclude_ep_id:
+                    continue
+                ts = ep.get('temperature_source')
+                if ts and ts.get('peripheral_id') == peripheral_id and ts.get('channel') == channel:
+                    result = dict(ep)
+                    result['ep_id'] = ep_id
+                    result['is_test'] = False
+                    return result
+        return None
+
+    def clear_temperature_source(self, ep_id: str):
+        """Remove the temperature_source link from the given EP (force-unlink)."""
+        with self._lock:
+            ep = self._eps.get(ep_id)
+            if ep:
+                ep['temperature_source'] = None

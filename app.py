@@ -618,6 +618,25 @@ def on_set_relay(data):
 @socketio.on('add_emission_point')
 @ws_login_required
 def on_add_emission_point(data):
+    ts = data.get('temperature_source') or None
+    if ts:
+        conflict = ep_mgr.find_temperature_source_conflict(
+            ts.get('peripheral_id', ''), ts.get('channel', -1)
+        )
+        if conflict and not data.get('force_unlink'):
+            emit('action_result', {
+                'success': False,
+                'conflict': {
+                    'ep_id':           conflict['ep_id'],
+                    'ep_name':         conflict.get('display_name', ''),
+                    'peripheral_id':   ts['peripheral_id'],
+                    'channel':         ts['channel'],
+                },
+            })
+            return
+        if conflict:
+            ep_mgr.clear_temperature_source(conflict['ep_id'])
+
     result = ep_mgr.add_ep(data)
     if result['success']:
         state.save_emission_points(ep_mgr.get_configs())
@@ -629,6 +648,26 @@ def on_add_emission_point(data):
 @ws_login_required
 def on_edit_emission_point(data):
     ep_id = data.get('ep_id', '')
+    ts = data.get('temperature_source') or None
+    if ts:
+        conflict = ep_mgr.find_temperature_source_conflict(
+            ts.get('peripheral_id', ''), ts.get('channel', -1),
+            exclude_ep_id=ep_id,
+        )
+        if conflict and not data.get('force_unlink'):
+            emit('action_result', {
+                'success': False,
+                'conflict': {
+                    'ep_id':           conflict['ep_id'],
+                    'ep_name':         conflict.get('display_name', ''),
+                    'peripheral_id':   ts['peripheral_id'],
+                    'channel':         ts['channel'],
+                },
+            })
+            return
+        if conflict:
+            ep_mgr.clear_temperature_source(conflict['ep_id'])
+
     result = ep_mgr.edit_ep(ep_id, data)
     if result['success']:
         updated_ep = result['ep']
@@ -1862,14 +1901,20 @@ def _polling_loop():
                             'alt': device.alt if device.alt is not None else '',
                             'ep_info': ep,
                         }
+                        _tc_col = reading.get('_tc_column')
+                        _tc_val = reading.get('_tc_value')
                         nas_relay.write_reading(device.device_name, reading,
                                                 serial=_serial, ep_name=_ep_name,
-                                                meta=_nas_meta)
+                                                meta=_nas_meta,
+                                                tc_column_name=_tc_col,
+                                                tc_value=_tc_val)
                         if exp_subdir:
                             nas_relay.write_reading(device.device_name, reading,
                                                     subdir=exp_subdir,
                                                     serial=_serial, ep_name=_ep_name,
-                                                    meta=_nas_meta)
+                                                    meta=_nas_meta,
+                                                    tc_column_name=_tc_col,
+                                                    tc_value=_tc_val)
 
             heartbeat_tick += 1
             if heartbeat_tick >= 5:

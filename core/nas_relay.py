@@ -141,14 +141,16 @@ class NasRelay:
             self._probe_ts = 0.0
 
     def write_reading(self, device_name: str, reading: dict, subdir: str | None = None,
-                      serial: str = '', ep_name: str = '', meta: dict | None = None):
+                      serial: str = '', ep_name: str = '', meta: dict | None = None,
+                      tc_column_name: str | None = None, tc_value=None):
         """Append one reading row. Called from poll loop — must be fast.
 
-        subdir   : optional subdirectory under self._path (e.g. 'Experiments/MyExp_20260325').
-                   Used to mirror experiment data into a separate folder on the NAS.
-        serial   : device serial number — embedded in the CSV filename.
-        ep_name  : emission point display name — embedded in the CSV filename.
-        meta     : dict of metadata to write alongside a new CSV file (written once).
+        subdir         : optional subdirectory under self._path.
+        serial         : device serial number — embedded in the CSV filename.
+        ep_name        : emission point display name — embedded in the CSV filename.
+        meta           : dict of metadata to write alongside a new CSV file (written once).
+        tc_column_name : optional thermocouple column name (e.g. 'tc_stack_a_c').
+        tc_value       : thermocouple reading for that column (float or None).
         """
         if not self._enabled or not self._path:
             return
@@ -158,8 +160,13 @@ class NasRelay:
         now = datetime.now(timezone.utc)
         date_str = now.strftime('%Y-%m-%d')
         subdir_key = subdir or ''
-        file_key = f'{subdir_key}|{safe_name}_{safe_serial}_{safe_ep}_{date_str}'
+        # Include tc column name in the file key so a schema change always creates a new file
+        # rather than appending mismatched rows to an existing one.
+        tc_key_part = tc_column_name or ''
+        file_key = f'{subdir_key}|{safe_name}_{safe_serial}_{safe_ep}_{date_str}|{tc_key_part}'
         ts = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        effective_header = CSV_HEADER + ([tc_column_name] if tc_column_name else [])
 
         row_values = []
         for key, places in zip(_RELAY_KEYS, _RELAY_ROUND):
@@ -171,6 +178,11 @@ class NasRelay:
                     pass
             row_values.append(v)
         row = [ts, device_name] + row_values
+        if tc_column_name:
+            try:
+                row.append(round(float(tc_value), 3) if tc_value is not None else '')
+            except (TypeError, ValueError):
+                row.append('')
 
         with self._lock:
             if not self._enabled:
@@ -180,11 +192,8 @@ class NasRelay:
             if writer is None:
                 return
             if needs_header:
-                writer.writerow(CSV_HEADER)
+                writer.writerow(effective_header)
             writer.writerow(row)
-            # Flush so data is visible on the NAS immediately.
-            # If the network path has dropped, the flush raises OSError (EINVAL/EIO).
-            # Close and evict the stale handle so the next write re-opens cleanly.
             try:
                 self._open_files[file_key][0].flush()
             except OSError:
@@ -197,7 +206,8 @@ class NasRelay:
 
         # Write metadata sidecar outside the lock (file I/O, not performance-critical)
         if needs_header and new_file_path:
-            self._write_metadata_txt(new_file_path, device_name, serial, ep_name, meta or {})
+            self._write_metadata_txt(new_file_path, device_name, serial, ep_name,
+                                     meta or {}, tc_column_name)
 
     def _check_accessible(self) -> bool | None:
         """Probe-write the NAS path. Returns True/False; None if not enabled.
@@ -255,7 +265,8 @@ class NasRelay:
             return None, False, None
 
     def _write_metadata_txt(self, csv_path: str, device_name: str,
-                             serial: str, ep_name: str, meta: dict):
+                             serial: str, ep_name: str, meta: dict,
+                             tc_column_name: str | None = None):
         """Write a human-readable .txt sidecar alongside a newly created NAS CSV."""
         txt_path = os.path.splitext(csv_path)[0] + '.txt'
         now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -277,6 +288,15 @@ class NasRelay:
             f'EP Longitude:   {ep.get("lon", "")} deg',
             f'EP Altitude:    {ep.get("alt", "")} m',
             f'EP Install Date:{ep.get("install_datetime", "")}',
+        ]
+        if tc_column_name:
+            lines += [
+                '',
+                '=== Linked Temperature Sensor ===',
+                f'Peripheral:    {meta.get("tc_peripheral_name", "")}',
+                f'Channel:       {meta.get("tc_channel_label", "")}',
+            ]
+        lines += [
             '',
             '=== Column Descriptions ===',
             '  timestamp_utc: Timestamp (UTC, ISO 8601)',
@@ -288,6 +308,9 @@ class NasRelay:
             '  setpoint_slpm: Flow setpoint (SLPM)',
             '  accumulated_sl: Accumulated volume (SL)',
         ]
+        if tc_column_name:
+            tc_label = meta.get('tc_channel_label', tc_column_name)
+            lines.append(f'  {tc_column_name}: Linked thermocouple channel "{tc_label}" (°C)')
         try:
             with open(txt_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')

@@ -78,6 +78,15 @@ def _safe_filename_part(value: str, fallback: str = '') -> str:
     return (value or fallback).replace(' ', '_').replace('/', '-').replace('\\', '-')
 
 
+def safe_tc_column_name(channel_label: str) -> str:
+    """Convert a thermocouple channel label to a safe CSV column name.
+    E.g. 'Stack A' -> 'tc_stack_a_c'
+    """
+    import re
+    slug = re.sub(r'[^a-z0-9]+', '_', channel_label.lower().strip()).strip('_')
+    return f'tc_{slug}_c' if slug else 'tc_c'
+
+
 class RawDataLogger:
     """
     Appends Alicat readings to a time-rotating CSV in Data/Raw/.
@@ -95,17 +104,22 @@ class RawDataLogger:
     FIELDNAMES = [col for col, _, _ in _RAW_FIELD_MAP]
 
     def __init__(self, device_name, data_dir='Data/Raw', rotation_minutes=1440,
-                 device_meta=None):
+                 device_meta=None, tc_column_name=None):
         self.device_name = device_name
         self.data_dir = data_dir
         self.rotation_minutes = max(1, int(rotation_minutes))
         self._safe_name = _safe_filename_part(device_name, 'device')
         self._device_meta = device_meta or {}
+        self._tc_column_name = tc_column_name or None
         # Serial and EP name components derived from device_meta
         self._safe_serial = _safe_filename_part(
             self._device_meta.get('serial', ''), 'NoSerial')
         self._safe_ep_name = _safe_filename_part(
             self._device_meta.get('ep_display_name', ''), 'TEST')
+        # Instance-level fieldnames so the TC column can extend per-logger
+        self._fieldnames = list(self.FIELDNAMES)
+        if self._tc_column_name:
+            self._fieldnames.append(self._tc_column_name)
         self._file = None
         self._writer = None
         self._current_period = None
@@ -132,7 +146,7 @@ class RawDataLogger:
         path = os.path.join(self.data_dir, fname)
         is_new = not os.path.exists(path)
         self._file = open(path, 'a', newline='')   # may raise; _current_period unchanged
-        self._writer = csv.DictWriter(self._file, fieldnames=self.FIELDNAMES)
+        self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
         self._current_period = key   # only committed after open() succeeds
         if is_new:
             self._writer.writeheader()
@@ -144,6 +158,11 @@ class RawDataLogger:
         now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         meta = self._device_meta
         ep = meta.get('ep_info') or {}
+        tc_desc = {}
+        if self._tc_column_name:
+            tc_label = meta.get('tc_channel_label', self._tc_column_name)
+            tc_desc[self._tc_column_name] = f'Linked thermocouple channel "{tc_label}" (°C)'
+        col_desc = {**_ALICAT_FIELD_DESCRIPTIONS, **tc_desc}
         lines = [
             '=== ExxonController Flow Controller Metadata ===',
             f'Device Name:   {self.device_name}',
@@ -163,17 +182,25 @@ class RawDataLogger:
             f'EP Longitude:   {ep.get("lon", "")} deg',
             f'EP Altitude:    {ep.get("alt", "")} m',
             f'EP Install Date:{ep.get("install_datetime", "")}',
+        ]
+        if self._tc_column_name:
+            lines += [
+                '',
+                '=== Linked Temperature Sensor ===',
+                f'Peripheral:    {meta.get("tc_peripheral_name", "")}',
+                f'Channel:       {meta.get("tc_channel_label", "")}',
+            ]
+        lines += [
             '',
             '=== Column Descriptions ===',
-        ] + [f'  {col}: {_ALICAT_FIELD_DESCRIPTIONS.get(col, col)}'
-             for col in self.FIELDNAMES]
+        ] + [f'  {col}: {col_desc.get(col, col)}' for col in self._fieldnames]
         try:
             with open(txt_path, 'w') as f:
                 f.write('\n'.join(lines) + '\n')
         except OSError:
             pass
 
-    def log(self, reading: dict):
+    def log(self, reading: dict, tc_value=None):
         self._rotate()
         row = {}
         for col, key, places in _RAW_FIELD_MAP:
@@ -181,6 +208,8 @@ class RawDataLogger:
             if places is not None:
                 v = _round_value(v, places)
             row[col] = v
+        if self._tc_column_name:
+            row[self._tc_column_name] = _round_value(tc_value, 3) if tc_value is not None else ''
         self._writer.writerow(row)
         self._row_count += 1
         if self._row_count % 10 == 0:

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from dateutil import parser as date_parser
 
 from core.alicat_device import AlicatDevice, DEVICE_CONFIGS
-from core.data_logger import RawDataLogger, ExperimentDataLogger, PeripheralDataLogger
+from core.data_logger import RawDataLogger, ExperimentDataLogger, PeripheralDataLogger, safe_tc_column_name
 from core.phidget_manager import create_peripheral, PHIDGET_AVAILABLE_FLAG, check_server_health
 
 
@@ -385,18 +385,36 @@ class DeviceManager:
                 if ep:
                     ep_info = ep
 
+            # Determine linked thermocouple channel for combined logging
+            tc_col_name = None
+            tc_channel_label = ''
+            tc_peripheral_name = ''
+            ts = ep_info.get('temperature_source') if ep_info else None
+            if ts:
+                periph_id = ts.get('peripheral_id', '')
+                ch = ts.get('channel', 0)
+                periph = self._peripherals.get(periph_id)
+                if periph:
+                    labels = getattr(periph, 'channel_labels', None) or []
+                    tc_channel_label = labels[ch] if ch < len(labels) else f'CH{ch}'
+                    tc_peripheral_name = getattr(periph, 'name', periph_id)
+                    tc_col_name = safe_tc_column_name(tc_channel_label)
+
             device_meta = {
-                'device_type':    device.device_type,
-                'location':       device.device_name,
-                'serial':         getattr(device, 'serial_number', '') or '',
-                'lat':            device.lat if device.lat is not None else '',
-                'lon':            device.lon if device.lon is not None else '',
-                'alt':            device.alt if device.alt is not None else '',
-                'ep_display_name': ep_info.get('display_name', 'TEST'),
-                'ep_info':        ep_info,
+                'device_type':        device.device_type,
+                'location':           device.device_name,
+                'serial':             getattr(device, 'serial_number', '') or '',
+                'lat':                device.lat if device.lat is not None else '',
+                'lon':                device.lon if device.lon is not None else '',
+                'alt':                device.alt if device.alt is not None else '',
+                'ep_display_name':    ep_info.get('display_name', 'TEST'),
+                'ep_info':            ep_info,
+                'tc_channel_label':   tc_channel_label,
+                'tc_peripheral_name': tc_peripheral_name,
             }
             logger = RawDataLogger(device_name=device.device_name, data_dir=RAW_DATA_DIR,
-                                   rotation_minutes=rotation_minutes, device_meta=device_meta)
+                                   rotation_minutes=rotation_minutes, device_meta=device_meta,
+                                   tc_column_name=tc_col_name)
             self._raw_loggers[device_id] = logger
             self._running[device_id] = True
 
@@ -830,6 +848,32 @@ class DeviceManager:
 
         return device_id, reading
 
+    def _is_peripheral_active(self, peripheral_id: str, alicat_readings: dict) -> bool:
+        """Return True if at least one channel of this peripheral is linked to an EP
+        whose Alicat device currently has a non-zero setpoint, or if an experiment
+        is running (which implies all linked peripherals should log)."""
+        if not self._ep_mgr:
+            return False
+        # Experiment running — log everything that has a link.
+        if self._exp_logger is not None:
+            for ep in self._ep_mgr.get_all_states():
+                ts = ep.get('temperature_source')
+                if ts and ts.get('peripheral_id') == peripheral_id:
+                    return True
+            return False
+        # No experiment — log only when the linked EP's device has setpoint > 0.
+        for ep in self._ep_mgr.get_all_states():
+            ts = ep.get('temperature_source')
+            if not ts or ts.get('peripheral_id') != peripheral_id:
+                continue
+            ep_id = ep['ep_id']
+            for device_id, reading in alicat_readings.items():
+                device = self._alicat.get(device_id)
+                if device and getattr(device, 'emission_point_id', None) == ep_id:
+                    if (reading.get('setpoint') or 0) > 0:
+                        return True
+        return False
+
     def poll_all(self) -> dict:
         """
         Poll all devices and peripherals concurrently.
@@ -923,9 +967,33 @@ class DeviceManager:
                 self.stop_device(device_id)
                 self.socketio.emit('device_update', self.get_device_state(device_id))
 
+            # Fetch the linked thermocouple channel value for combined logging
+            tc_value = None
+            tc_col = None
+            ep_id_for_tc = getattr(device, 'emission_point_id', None)
+            ep_for_tc = self._ep_mgr.get_ep(ep_id_for_tc) if self._ep_mgr and ep_id_for_tc else None
+            ts = ep_for_tc.get('temperature_source') if ep_for_tc else None
+            if ts:
+                periph_id = ts.get('peripheral_id', '')
+                ch = ts.get('channel', 0)
+                periph = self._peripherals.get(periph_id)
+                if periph:
+                    try:
+                        vals = periph.read()
+                        tc_value = vals[ch] if ch < len(vals) else None
+                    except Exception:
+                        tc_value = None
+                    labels = getattr(periph, 'channel_labels', None) or []
+                    label = labels[ch] if ch < len(labels) else f'CH{ch}'
+                    tc_col = safe_tc_column_name(label)
+
             raw_logger = self._raw_loggers.get(device_id)
             if raw_logger:
-                raw_logger.log(dict(reading) | geo)
+                raw_logger.log(dict(reading) | geo, tc_value=tc_value)
+
+            # Attach TC info to the reading dict so the NAS relay in app.py can mirror it
+            readings['alicat'][device_id]['_tc_column'] = tc_col
+            readings['alicat'][device_id]['_tc_value']  = tc_value
 
             exp_logger = self._exp_logger
             if exp_logger:
@@ -1041,10 +1109,8 @@ class DeviceManager:
                         gevent.get_hub().threadpool.spawn(_try_reopen)
 
             readings['peripherals'][peripheral_id] = pstate
-            # Log peripheral state to CSV when connected
-            periph_logger = self._periph_loggers.get(peripheral_id)
-            if periph_logger and curr_connected:
-                periph_logger.log(now_ts, pstate.get('values', []))
+            # Peripheral data is written into the linked EP's combined Alicat CSV.
+            # Unlinked peripherals are not logged. No standalone peripheral CSV is written.
             hist_entry = {'timestamp': now_ts, 'values': pstate.get('values', [])}
             self._histories[peripheral_id].append(hist_entry)
 

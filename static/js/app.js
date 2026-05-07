@@ -2133,7 +2133,93 @@ const app = (() => {
 
   // ── Emission Point CRUD ───────────────────────────────────────────────────
 
-  function addEmissionPoint() {
+  // ── Temperature-source helpers ────────────────────────────────────────────
+
+  function _thermoPeripherals() {
+    return Object.values(_peripherals).filter(p => p.type === 'thermocouple' && !p.disabled);
+  }
+
+  function _linkedEpForChannel(peripheralId, channel, excludeEpId) {
+    return _emissionPoints.find(ep => {
+      if (ep.ep_id === excludeEpId || ep.is_test) return false;
+      const ts = ep.temperature_source;
+      return ts && ts.peripheral_id === peripheralId && ts.channel === channel;
+    }) || null;
+  }
+
+  function _populateTempPeriphDropdown(context, selectedPeriphId) {
+    const sel = document.getElementById(`${context}EpTempPeriph`);
+    if (!sel) return;
+    const prev = selectedPeriphId ?? sel.value;
+    sel.innerHTML = '<option value="">— none —</option>';
+    _thermoPeripherals().forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.peripheral_id;
+      opt.textContent = p.name;
+      if (p.peripheral_id === prev) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function _populateTempChannelDropdown(context, peripheralId, selectedChannel, excludeEpId) {
+    const sel = document.getElementById(`${context}EpTempChannel`);
+    if (!sel) return;
+    if (!peripheralId) {
+      sel.disabled = true;
+      sel.innerHTML = '<option value="">— select peripheral first —</option>';
+      return;
+    }
+    const periph = _peripherals[peripheralId];
+    const labels = periph?.channel_labels?.length ? periph.channel_labels : ['CH0','CH1','CH2','CH3'];
+    sel.innerHTML = '<option value="">— select channel —</option>';
+    labels.forEach((lbl, i) => {
+      const linked = _linkedEpForChannel(peripheralId, i, excludeEpId);
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = linked ? `${lbl}  (linked to ${linked.display_name})` : lbl;
+      if (i === selectedChannel) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.disabled = false;
+  }
+
+  function onEpTempPeriphChange(context) {
+    const peripheralId = document.getElementById(`${context}EpTempPeriph`)?.value || '';
+    const excludeEpId  = context === 'edit' ? (document.getElementById('editEpId')?.value || null) : null;
+    _populateTempChannelDropdown(context, peripheralId, undefined, excludeEpId);
+    const warnEl = document.getElementById(`${context}EpTempWarn`);
+    if (warnEl) warnEl.classList.add('d-none');
+  }
+
+  function onEpTempChannelChange(context) {
+    const peripheralId = document.getElementById(`${context}EpTempPeriph`)?.value || '';
+    const channelVal   = document.getElementById(`${context}EpTempChannel`)?.value;
+    const excludeEpId  = context === 'edit' ? (document.getElementById('editEpId')?.value || null) : null;
+    const warnEl = document.getElementById(`${context}EpTempWarn`);
+    if (!warnEl) return;
+    if (peripheralId && channelVal !== '') {
+      const linked = _linkedEpForChannel(peripheralId, parseInt(channelVal), excludeEpId);
+      if (linked) {
+        warnEl.textContent = `⚠ This channel is currently linked to ${linked.display_name}. Use "Unlink & Save" to move it here.`;
+        warnEl.classList.remove('d-none');
+      } else {
+        warnEl.classList.add('d-none');
+      }
+    } else {
+      warnEl.classList.add('d-none');
+    }
+  }
+
+  function _getTempSource(context) {
+    const peripheralId = document.getElementById(`${context}EpTempPeriph`)?.value || '';
+    const channelVal   = document.getElementById(`${context}EpTempChannel`)?.value;
+    if (!peripheralId || channelVal === '' || channelVal === undefined) return null;
+    return { peripheral_id: peripheralId, channel: parseInt(channelVal) };
+  }
+
+  // ── Emission point add/edit ───────────────────────────────────────────────
+
+  function addEmissionPoint(forceUnlink) {
     const errEl = document.getElementById('addEpError');
     const name    = document.getElementById('addEpName')?.value.trim() || '';
     const desc    = document.getElementById('addEpDesc')?.value.trim() || '';
@@ -2148,6 +2234,9 @@ const app = (() => {
     if (lat === '' || lon === '') { _showModalError(errEl, 'Location (lat/lon) is required'); return; }
 
     if (errEl) errEl.classList.add('d-none');
+    const forceBtn = document.getElementById('addEpForceBtn');
+    if (forceBtn) forceBtn.classList.add('d-none');
+
     const modalEl = document.getElementById('addEpModal');
     socket.once('action_result', result => {
       if (result.success) {
@@ -2155,18 +2244,30 @@ const app = (() => {
         _clearAddEpForm();
         window.switchMainTab('map');
         if (window.ecMap && result.ep_id) window.ecMap.focusEp(result.ep_id);
+      } else if (result.conflict) {
+        const c = result.conflict;
+        const periph = _peripherals[c.peripheral_id];
+        const chLabels = periph?.channel_labels || [];
+        const chLabel  = chLabels[c.channel] || `CH${c.channel}`;
+        if (errEl) {
+          errEl.textContent = `Channel "${chLabel}" is already linked to ${c.ep_name}. Click "Unlink & Save" to move it here instead.`;
+          errEl.classList.remove('d-none');
+        }
+        if (forceBtn) forceBtn.classList.remove('d-none');
       } else if (result.error) {
         _showModalError(errEl, result.error);
       }
     });
     socket.emit('add_emission_point', {
-      base_name: name,
-      description: desc,
-      lat: parseFloat(lat),
-      lon: parseFloat(lon),
-      alt: alt !== '' ? parseFloat(alt) : null,
+      base_name:        name,
+      description:      desc,
+      lat:              parseFloat(lat),
+      lon:              parseFloat(lon),
+      alt:              alt !== '' ? parseFloat(alt) : null,
       install_datetime: install,
-      photo_filename: _addEpPendingPhotoFilename || null,
+      photo_filename:   _addEpPendingPhotoFilename || null,
+      temperature_source: _getTempSource('add'),
+      force_unlink:     forceUnlink ? true : undefined,
     });
   }
 
@@ -2180,6 +2281,13 @@ const app = (() => {
     const preview = document.getElementById('addEpPhotoPreview');
     if (preview) preview.classList.add('d-none');
     _addEpPendingPhotoFilename = null;
+    // Reset temperature source fields
+    _populateTempPeriphDropdown('add', '');
+    _populateTempChannelDropdown('add', '', undefined, null);
+    const warnEl = document.getElementById('addEpTempWarn');
+    if (warnEl) warnEl.classList.add('d-none');
+    const forceBtn = document.getElementById('addEpForceBtn');
+    if (forceBtn) forceBtn.classList.add('d-none');
   }
 
   function openEditEpModal(epId) {
@@ -2214,11 +2322,20 @@ const app = (() => {
     const photoInput = document.getElementById('editEpPhoto');
     if (photoInput) photoInput.value = '';
 
+    // Populate temperature source dropdowns
+    const ts = ep.temperature_source;
+    _populateTempPeriphDropdown('edit', ts?.peripheral_id || '');
+    _populateTempChannelDropdown('edit', ts?.peripheral_id || '', ts?.channel, epId);
+    const warnEl = document.getElementById('editEpTempWarn');
+    if (warnEl) warnEl.classList.add('d-none');
+    const forceBtn = document.getElementById('editEpForceBtn');
+    if (forceBtn) forceBtn.classList.add('d-none');
+
     document.getElementById('editEpError').classList.add('d-none');
     new bootstrap.Modal(document.getElementById('editEpModal')).show();
   }
 
-  function saveEditEmissionPoint() {
+  function saveEditEmissionPoint(forceUnlink) {
     const errEl = document.getElementById('editEpError');
     const epId   = document.getElementById('editEpId')?.value || '';
     const desc   = document.getElementById('editEpDesc')?.value.trim() || '';
@@ -2242,6 +2359,9 @@ const app = (() => {
     }
 
     if (errEl) errEl.classList.add('d-none');
+    const forceBtn = document.getElementById('editEpForceBtn');
+    if (forceBtn) forceBtn.classList.add('d-none');
+
     const modalEl = document.getElementById('editEpModal');
     socket.once('action_result', result => {
       if (result.success) {
@@ -2250,18 +2370,30 @@ const app = (() => {
         _editEpClearPhoto = false;
         window.switchMainTab('map');
         if (window.ecMap) window.ecMap.focusEp(epId);
+      } else if (result.conflict) {
+        const c = result.conflict;
+        const periph = _peripherals[c.peripheral_id];
+        const chLabels = periph?.channel_labels || [];
+        const chLabel  = chLabels[c.channel] || `CH${c.channel}`;
+        if (errEl) {
+          errEl.textContent = `Channel "${chLabel}" is already linked to ${c.ep_name}. Click "Unlink & Save" to move it here instead.`;
+          errEl.classList.remove('d-none');
+        }
+        if (forceBtn) forceBtn.classList.remove('d-none');
       } else if (result.error) {
         _showModalError(errEl, result.error);
       }
     });
     socket.emit('edit_emission_point', {
-      ep_id: epId,
-      description: desc,
-      lat: parseFloat(lat),
-      lon: parseFloat(lon),
-      alt: alt !== '' ? parseFloat(alt) : null,
-      install_datetime: install,
-      photo_filename: photoFilename,
+      ep_id:              epId,
+      description:        desc,
+      lat:                parseFloat(lat),
+      lon:                parseFloat(lon),
+      alt:                alt !== '' ? parseFloat(alt) : null,
+      install_datetime:   install,
+      photo_filename:     photoFilename,
+      temperature_source: _getTempSource('edit'),
+      force_unlink:       forceUnlink ? true : undefined,
     });
   }
 
@@ -2449,6 +2581,22 @@ const app = (() => {
     _rtkPendingResult  = null;
   }
 
+  // Populate the peripheral dropdown whenever the Add EP modal opens so the
+  // list reflects currently connected devices at the moment the user opens it.
+  document.addEventListener('DOMContentLoaded', () => {
+    const addEpModalEl = document.getElementById('addEpModal');
+    if (addEpModalEl) {
+      addEpModalEl.addEventListener('show.bs.modal', () => {
+        _populateTempPeriphDropdown('add', '');
+        _populateTempChannelDropdown('add', '', undefined, null);
+        const warnEl = document.getElementById('addEpTempWarn');
+        if (warnEl) warnEl.classList.add('d-none');
+        const forceBtn = document.getElementById('addEpForceBtn');
+        if (forceBtn) forceBtn.classList.add('d-none');
+      });
+    }
+  });
+
   // Public API ────────────────────────────────────────────────────────────
   return {
     addDevice, removeDevice, openEditDeviceModal, saveEditDevice, toggleDisableDevice, toggleDeviceCollapse, toggleSectionCollapse,
@@ -2475,6 +2623,7 @@ const app = (() => {
     addEmissionPoint, openEditEpModal, saveEditEmissionPoint, removeEmissionPoint,
     onEpPhotoSelected, clearEpPhoto, pickEpLocation, readRtkLocation, acceptRtkLocation,
     onAddDeviceEpChange, onEditDeviceEpChange,
+    onEpTempPeriphChange, onEpTempChannelChange,
   };
 
 })();
