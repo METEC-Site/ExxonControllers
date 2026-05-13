@@ -46,6 +46,7 @@ except (ImportError, OSError):
 # A C-level lock is used so it is never monkey-patched by gevent.
 
 _server_lock = _cthread.allocate_lock()  # C-level lock
+_net_add_lock = _cthread.allocate_lock()  # serialises concurrent Net.addServer() calls
 _server_periph_map: dict[str, object] = {}   # server_name -> peripheral
 _server_events_registered = False
 _server_gen = 0  # modular generation counter
@@ -69,20 +70,21 @@ def _server_acquire(hostname, port, password, peripheral=None):
     with _server_lock:
         if peripheral is not None:
             _server_periph_map[server_name] = peripheral
-    # If a stale registration with this name still exists (the async
-    # removeServer from a previous cycle hasn't completed yet), remove it
-    # synchronously *in a daemon thread* before adding the new one.  This
-    # should be rare — it only happens if the modulus wraps before cleanup.
-    try:
-        Net.addServer(server_name, hostname, port, password, 0)
-    except Exception:
-        # Likely "Duplicate" — the previous async remove hasn't finished.
-        # Force-remove then retry once.
+    # Serialise Net.addServer() calls: the Phidget22 C library's server
+    # registry is not safe for concurrent addServer from multiple OS threads
+    # (e.g. when several peripherals reconnect simultaneously).  The lock is
+    # C-level and never monkey-patched by gevent, so it is always effective.
+    with _net_add_lock:
         try:
-            Net.removeServer(server_name)
+            Net.addServer(server_name, hostname, port, password, 0)
         except Exception:
-            pass
-        Net.addServer(server_name, hostname, port, password, 0)
+            # Likely "Duplicate" — the previous async remove hasn't finished.
+            # Force-remove then retry once.
+            try:
+                Net.removeServer(server_name)
+            except Exception:
+                pass
+            Net.addServer(server_name, hostname, port, password, 0)
     return server_name
 
 

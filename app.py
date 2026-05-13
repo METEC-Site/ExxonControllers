@@ -1914,7 +1914,8 @@ def _polling_loop():
                                                     serial=_serial, ep_name=_ep_name,
                                                     meta=_nas_meta,
                                                     tc_column_name=_tc_col,
-                                                    tc_value=_tc_val)
+                                                    tc_value=_tc_val,
+                                                    date_nested=False)
 
             heartbeat_tick += 1
             if heartbeat_tick >= 5:

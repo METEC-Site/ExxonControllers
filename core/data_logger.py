@@ -4,12 +4,12 @@ Data Logger
 CSV logging for Alicat devices and peripherals.
 
 Structure:
-  Data/Raw/alicat_<name>_<period>.csv      — rotating on a configurable interval, append mode
-  Data/Raw/alicat_<name>_<period>.txt      — metadata sidecar (human-readable)
-  Data/Raw/peripheral_<name>_<date>.csv    — daily rotating peripheral state log
-  Data/Raw/peripheral_<name>_<date>.txt    — metadata sidecar
-  Data/Experiments/<folder>/<name>.csv     — one file per experiment segment, long-format
-  Data/Experiments/<folder>/metadata.txt   — human-readable experiment metadata
+  Data/Raw/YYYY/MM/DD/alicat_<name>_<period>.csv  — rotating on a configurable interval, append mode
+  Data/Raw/YYYY/MM/DD/alicat_<name>_<period>.txt  — metadata sidecar (human-readable)
+  Data/Raw/YYYY/MM/DD/peripheral_<name>_<date>.csv — daily rotating peripheral state log
+  Data/Raw/YYYY/MM/DD/peripheral_<name>_<date>.txt — metadata sidecar
+  Data/Experiments/<folder>/<name>.csv             — one file per experiment segment, long-format
+  Data/Experiments/<folder>/metadata.txt           — human-readable experiment metadata
 """
 
 import csv
@@ -127,9 +127,10 @@ class RawDataLogger:
         os.makedirs(data_dir, exist_ok=True)
         self._rotate()
 
-    def _period_key(self):
+    def _period_key(self, now=None):
         """Return the filename suffix for the current rotation window."""
-        now = datetime.now(timezone.utc)
+        if now is None:
+            now = datetime.now(timezone.utc)
         if self.rotation_minutes >= 1440:
             return now.date().isoformat()
         day_minutes = now.hour * 60 + now.minute
@@ -138,12 +139,18 @@ class RawDataLogger:
         return f"{now.date().isoformat()}T{h:02d}{m:02d}"
 
     def _rotate(self):
-        key = self._period_key()
+        now = datetime.now(timezone.utc)
+        key = self._period_key(now)
         if self._current_period == key:
             return
         self._close_file()
+        date_dir = os.path.join(self.data_dir,
+                                now.strftime('%Y'),
+                                now.strftime('%m'),
+                                now.strftime('%d'))
+        os.makedirs(date_dir, exist_ok=True)
         fname = f"{self._safe_name}_{self._safe_serial}_{self._safe_ep_name}_{key}.csv"
-        path = os.path.join(self.data_dir, fname)
+        path = os.path.join(date_dir, fname)
         is_new = not os.path.exists(path)
         self._file = open(path, 'a', newline='')   # may raise; _current_period unchanged
         self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
@@ -427,16 +434,19 @@ class PeripheralDataLogger:
         os.makedirs(data_dir, exist_ok=True)
         self._rotate()
 
-    def _day_key(self):
-        return datetime.now(timezone.utc).date().isoformat()
-
     def _rotate(self):
-        key = self._day_key()
+        now = datetime.now(timezone.utc)
+        key = now.date().isoformat()
         if self._current_day == key:
             return
         self._close_file()
+        date_dir = os.path.join(self.data_dir,
+                                now.strftime('%Y'),
+                                now.strftime('%m'),
+                                now.strftime('%d'))
+        os.makedirs(date_dir, exist_ok=True)
         fname = f"peripheral_{self._safe_name}_{key}.csv"
-        path = os.path.join(self.data_dir, fname)
+        path = os.path.join(date_dir, fname)
         is_new = not os.path.exists(path)
         self._file = open(path, 'a', newline='')   # may raise; _current_day unchanged
         self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)

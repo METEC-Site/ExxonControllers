@@ -3,7 +3,7 @@
 NAS File Echo Relay
 Appends Alicat flow controller readings to per-device CSV files on a network share.
 
-File naming: {output_dir}/{device_name}_{YYYY-MM-DD}.csv
+File naming: {output_dir}/YYYY/MM/DD/{device_name}_{serial}_{ep}_{YYYY-MM-DD}.csv
 """
 
 import csv
@@ -142,7 +142,8 @@ class NasRelay:
 
     def write_reading(self, device_name: str, reading: dict, subdir: str | None = None,
                       serial: str = '', ep_name: str = '', meta: dict | None = None,
-                      tc_column_name: str | None = None, tc_value=None):
+                      tc_column_name: str | None = None, tc_value=None,
+                      date_nested: bool = True):
         """Append one reading row. Called from poll loop — must be fast.
 
         subdir         : optional subdirectory under self._path.
@@ -151,6 +152,8 @@ class NasRelay:
         meta           : dict of metadata to write alongside a new CSV file (written once).
         tc_column_name : optional thermocouple column name (e.g. 'tc_stack_a_c').
         tc_value       : thermocouple reading for that column (float or None).
+        date_nested    : when True (default), files are stored under YYYY/MM/DD/.
+                         Pass False for experiment echoes that use a fixed subdir.
         """
         if not self._enabled or not self._path:
             return
@@ -188,7 +191,7 @@ class NasRelay:
             if not self._enabled:
                 return
             writer, needs_header, new_file_path = self._get_writer(
-                file_key, safe_name, safe_serial, safe_ep, date_str, subdir)
+                file_key, safe_name, safe_serial, safe_ep, date_str, subdir, date_nested)
             if writer is None:
                 return
             if needs_header:
@@ -242,19 +245,25 @@ class NasRelay:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _get_writer(self, file_key: str, safe_name: str, safe_serial: str,
-                    safe_ep: str, date_str: str, subdir: str | None = None):
+                    safe_ep: str, date_str: str, subdir: str | None = None,
+                    date_nested: bool = True):
         """Return (writer, needs_header, file_path_if_new). Caller must hold self._lock."""
         if file_key in self._open_files:
             return self._open_files[file_key][1], False, None
 
         base_path = os.path.join(self._path, subdir) if subdir else self._path
+        if date_nested:
+            year, month, day = date_str[:4], date_str[5:7], date_str[8:10]
+            dest_dir = os.path.join(base_path, year, month, day)
+        else:
+            dest_dir = base_path
         try:
-            os.makedirs(base_path, exist_ok=True)
+            os.makedirs(dest_dir, exist_ok=True)
         except OSError:
             return None, False, None
 
         file_path = os.path.join(
-            base_path, f'{safe_name}_{safe_serial}_{safe_ep}_{date_str}.csv')
+            dest_dir, f'{safe_name}_{safe_serial}_{safe_ep}_{date_str}.csv')
         needs_header = not os.path.exists(file_path)
         try:
             fh = open(file_path, 'a', newline='', encoding='utf-8')
