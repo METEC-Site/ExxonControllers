@@ -149,6 +149,13 @@ def _install_gevent_error_handler():
     _orig = _hub.handle_error
 
     def _hub_error_handler(context, exc_type, exc_value, exc_tb):
+        # Suppress benign WebSocket client-disconnect noise.  When a browser tab
+        # closes without a clean WebSocket handshake, engineio's writer greenlet
+        # raises ConnectionAbortedError (Win) / ConnectionResetError / BrokenPipeError
+        # while trying to send the close frame.  This is expected and not actionable.
+        if issubclass(exc_type, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            if 'writer' in repr(context).lower():
+                return
         if not issubclass(exc_type, (gevent.GreenletExit, SystemExit)):
             tb_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
             _emit_log(
