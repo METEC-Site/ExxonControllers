@@ -81,6 +81,15 @@ os.makedirs(MAP_UPLOADS_DIR, exist_ok=True)
 os.makedirs(EP_PHOTOS_DIR, exist_ok=True)
 os.makedirs(TILE_CACHE_DIR, exist_ok=True)
 
+# Enable faulthandler so a fatal crash (e.g. an access violation in a native
+# extension like Phidget22 or gevent's libev) dumps the Python-level stack of
+# every thread to this file before the process dies.  The file handle must
+# stay open for the process lifetime — faulthandler writes to its raw fd.
+_crash_log_path = os.path.join(DATA_DIR, 'crash.log')
+_crash_log_file = open(_crash_log_path, 'a', buffering=1)
+faulthandler.enable(file=_crash_log_file, all_threads=True)
+print(f"  Crash diagnostics: {_crash_log_path}")
+
 # ── Flask App ─────────────────────────────────────────────────────────────────
 state = StateManager(CONFIG_DIR)
 app = Flask(__name__)

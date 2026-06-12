@@ -84,12 +84,15 @@ def _add_server(server_name, hostname, port, password):
 def _remove_server_async(server_name):
     """Remove a Net server by name asynchronously in a daemon thread so
     callers never block (Net.removeServer can stall 30+ s on an unreachable
-    server)."""
+    server).  Serialised with _add_server() via _net_add_lock — the Phidget22
+    C library's server registry is not safe for concurrent add/remove calls
+    from multiple OS threads, even on different server names."""
     def _do_remove():
-        try:
-            Net.removeServer(server_name)
-        except Exception:
-            pass
+        with _net_add_lock:
+            try:
+                Net.removeServer(server_name)
+            except Exception:
+                pass
     t = threading.Thread(target=_do_remove, daemon=True)
     t.start()
 
