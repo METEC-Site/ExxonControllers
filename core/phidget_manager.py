@@ -59,12 +59,12 @@ _server_gen = 0  # modular generation counter
 _SERVER_GEN_MODULUS = 10  # names rotate every 10 generations
 
 
-def _next_server_gen():
-    """Return the next generation number (mod _SERVER_GEN_MODULUS, thread-safe)."""
+def _next_server_gen_locked():
+    """Return the next generation number (mod _SERVER_GEN_MODULUS).
+    Caller must already hold _server_lock (which is not reentrant)."""
     global _server_gen
-    with _server_lock:
-        _server_gen = (_server_gen + 1) % _SERVER_GEN_MODULUS
-        return _server_gen
+    _server_gen = (_server_gen + 1) % _SERVER_GEN_MODULUS
+    return _server_gen
 
 
 def _add_server(server_name, hostname, port, password):
@@ -106,7 +106,7 @@ def _shared_server_acquire(hostname, port, password, peripheral):
             entry['refcount'] += 1
             _server_periph_map.setdefault(entry['server_name'], []).append(peripheral)
             return entry['server_name']
-        gen = _next_server_gen()
+        gen = _next_server_gen_locked()
         server_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
         _shared_servers[key] = {'server_name': server_name, 'refcount': 1}
         _server_periph_map[server_name] = [peripheral]
@@ -150,7 +150,7 @@ def _shared_server_reset(hostname, port, password):
         if entry is None:
             return
         old_name = entry['server_name']
-        gen = _next_server_gen()
+        gen = _next_server_gen_locked()
         new_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
         entry['server_name'] = new_name
         _server_periph_map[new_name] = _server_periph_map.pop(old_name, [])
