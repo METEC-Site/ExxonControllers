@@ -30,24 +30,30 @@ except (ImportError, OSError):
 # reliably for all channel types.
 
 
-# Per-peripheral server registry — each peripheral gets its own dedicated
-# Net.addServer registration so that close+open on one peripheral triggers a
-# full Net.removeServer / Net.addServer cycle with a fresh TCP connection,
-# without affecting any other peripheral.
+# Shared server registry — all peripherals pointing at the same
+# (host, port, password) endpoint share ONE Net.addServer registration,
+# reference-counted across them.  This avoids exhausting the Phidget network
+# server's connection-slot limit when several peripherals (e.g. 5 on the same
+# PhidgetSBC) would otherwise each open their own TCP connection.
+#
+# Per-peripheral reconnect operates only at the channel level
+# (ch.close()/ch.open(), see close(for_reconnect=True)) and never touches the
+# shared registration's refcount.  Only a full close()/open() (refcount
+# decrement to 0 / re-acquire) or check_server_health()'s _shared_server_reset
+# cycles the underlying Net server registration.
 #
 # A *bounded* modular generation counter (mod _SERVER_GEN_MODULUS) is
-# embedded in the server name so consecutive open() calls always get a
+# embedded in the server name so consecutive registrations always get a
 # distinct name, while the total number of unique names per host:port stays
-# small.  With a 3 s reopen interval and modulus 10, a name cannot be reused
-# until 30 s after it was last created — plenty of time for the async
-# removeServer to finish.  This prevents unbounded accumulation of stale
-# server registrations in the Phidget C library during long outages.
+# small.  This prevents unbounded accumulation of stale server registrations
+# in the Phidget C library during long outages.
 #
 # A C-level lock is used so it is never monkey-patched by gevent.
 
 _server_lock = _cthread.allocate_lock()  # C-level lock
 _net_add_lock = _cthread.allocate_lock()  # serialises concurrent Net.addServer() calls
-_server_periph_map: dict[str, object] = {}   # server_name -> peripheral
+_shared_servers: dict[tuple, dict] = {}   # (host, port, password) -> {'server_name': str, 'refcount': int}
+_server_periph_map: dict[str, list] = {}   # server_name -> [peripheral, ...]
 _server_events_registered = False
 _server_gen = 0  # modular generation counter
 _SERVER_GEN_MODULUS = 10  # names rotate every 10 generations
@@ -61,40 +67,24 @@ def _next_server_gen():
         return _server_gen
 
 
-def _server_acquire(hostname, port, password, peripheral=None):
-    """Register a uniquely-named Net server for this peripheral.
-    Returns the server_name which must be passed to _server_release later."""
-    gen = _next_server_gen()
-    server_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
-    _register_server_events_once()
-    with _server_lock:
-        if peripheral is not None:
-            _server_periph_map[server_name] = peripheral
-    # Serialise Net.addServer() calls: the Phidget22 C library's server
-    # registry is not safe for concurrent addServer from multiple OS threads
-    # (e.g. when several peripherals reconnect simultaneously).  The lock is
-    # C-level and never monkey-patched by gevent, so it is always effective.
+def _add_server(server_name, hostname, port, password):
+    """Call Net.addServer(), retrying once if the name is still registered
+    from a not-yet-finished async removeServer."""
     with _net_add_lock:
         try:
             Net.addServer(server_name, hostname, port, password, 0)
         except Exception:
-            # Likely "Duplicate" — the previous async remove hasn't finished.
-            # Force-remove then retry once.
             try:
                 Net.removeServer(server_name)
             except Exception:
                 pass
             Net.addServer(server_name, hostname, port, password, 0)
-    return server_name
 
 
-def _server_release(server_name):
-    """Remove a Net server by name.  Runs asynchronously in a daemon thread
-    so callers never block (Net.removeServer can stall 30+ s on an
-    unreachable server).  Safe because the next open() will use a different
-    server name — no race is possible."""
-    with _server_lock:
-        _server_periph_map.pop(server_name, None)
+def _remove_server_async(server_name):
+    """Remove a Net server by name asynchronously in a daemon thread so
+    callers never block (Net.removeServer can stall 30+ s on an unreachable
+    server)."""
     def _do_remove():
         try:
             Net.removeServer(server_name)
@@ -102,6 +92,70 @@ def _server_release(server_name):
             pass
     t = threading.Thread(target=_do_remove, daemon=True)
     t.start()
+
+
+def _shared_server_acquire(hostname, port, password, peripheral):
+    """Join (or create) the shared Net server registration for
+    (hostname, port, password).  Returns the current server_name.  Each
+    successful call must be matched by exactly one _shared_server_release()."""
+    _register_server_events_once()
+    key = (hostname, port, password)
+    with _server_lock:
+        entry = _shared_servers.get(key)
+        if entry is not None:
+            entry['refcount'] += 1
+            _server_periph_map.setdefault(entry['server_name'], []).append(peripheral)
+            return entry['server_name']
+        gen = _next_server_gen()
+        server_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
+        _shared_servers[key] = {'server_name': server_name, 'refcount': 1}
+        _server_periph_map[server_name] = [peripheral]
+    _add_server(server_name, hostname, port, password)
+    return server_name
+
+
+def _shared_server_release(hostname, port, password, peripheral):
+    """Release this peripheral's share of the (host, port, password)
+    registration.  When the refcount reaches zero, the underlying Net server
+    is removed."""
+    key = (hostname, port, password)
+    server_name = None
+    with _server_lock:
+        entry = _shared_servers.get(key)
+        if entry is None:
+            return
+        periphs = _server_periph_map.get(entry['server_name'])
+        if periphs is not None:
+            try:
+                periphs.remove(peripheral)
+            except ValueError:
+                pass
+        entry['refcount'] -= 1
+        if entry['refcount'] <= 0:
+            server_name = entry['server_name']
+            del _shared_servers[key]
+            _server_periph_map.pop(server_name, None)
+    if server_name is not None:
+        _remove_server_async(server_name)
+
+
+def _shared_server_reset(hostname, port, password):
+    """Cycle the underlying Net server registration for (host, port, password)
+    without changing its refcount.  Used by check_server_health() when an
+    endpoint is confirmed unreachable, so all peripherals sharing it get a
+    fresh TCP connection via a single removeServer/addServer pair."""
+    key = (hostname, port, password)
+    with _server_lock:
+        entry = _shared_servers.get(key)
+        if entry is None:
+            return
+        old_name = entry['server_name']
+        gen = _next_server_gen()
+        new_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
+        entry['server_name'] = new_name
+        _server_periph_map[new_name] = _server_periph_map.pop(old_name, [])
+    _add_server(new_name, hostname, port, password)
+    _remove_server_async(old_name)
 
 
 def _register_server_events_once():
@@ -126,14 +180,14 @@ def _on_net_server_added(server):
 
 def _on_net_server_removed(server):
     """Phidget network server disappeared.  Immediately invalidate _connected
-    flags for the peripheral on that server so the poll loop detects the
-    disconnect on the next cycle without waiting for on_detach to fire."""
+    flags for every peripheral sharing that server so the poll loop detects
+    the disconnect on the next cycle without waiting for on_detach to fire."""
     server_name = getattr(server, 'name', None)
     if not server_name:
         return
     with _server_lock:
-        periph = _server_periph_map.get(server_name)
-    if periph is not None:
+        periphs = list(_server_periph_map.get(server_name, []))
+    for periph in periphs:
         try:
             periph._on_server_removed()
         except Exception:
@@ -193,7 +247,7 @@ class ThermocouplePeripheral:
 
             try:
                 if self.server_hostname:
-                    self._server_name = _server_acquire(
+                    self._server_name = _shared_server_acquire(
                         self.server_hostname, self.server_port, self.server_password, self
                     )
 
@@ -261,10 +315,11 @@ class ThermocouplePeripheral:
                 except Exception:
                     pass
             self._channels.clear()
-            if self._server_name:
-                sn = self._server_name
+            if not for_reconnect and self._server_name:
                 self._server_name = None
-                _server_release(sn)
+                _shared_server_release(
+                    self.server_hostname, self.server_port, self.server_password, self
+                )
 
     def _on_server_removed(self):
         """Called by the Net server-removed event handler.  Immediately clears
@@ -379,7 +434,7 @@ class RelayPeripheral:
                 return True  # already open; caller must close() first to re-open
             try:
                 if self.server_hostname:
-                    self._server_name = _server_acquire(
+                    self._server_name = _shared_server_acquire(
                         self.server_hostname, self.server_port, self.server_password, self
                     )
                 for i in range(self.NUM_CHANNELS):
@@ -447,10 +502,11 @@ class RelayPeripheral:
                 except Exception:
                     pass
             self._channels.clear()
-            if self._server_name:
-                sn = self._server_name
+            if not for_reconnect and self._server_name:
                 self._server_name = None
-                _server_release(sn)
+                _shared_server_release(
+                    self.server_hostname, self.server_port, self.server_password, self
+                )
 
     def _on_server_removed(self):
         """Called by the Net server-removed event handler.  Immediately clears
@@ -560,7 +616,7 @@ class MechanicalRelayPeripheral(RelayPeripheral):
                 return True  # already open; caller must close() first to re-open
             try:
                 if self.server_hostname:
-                    self._server_name = _server_acquire(
+                    self._server_name = _shared_server_acquire(
                         self.server_hostname, self.server_port, self.server_password, self
                     )
                 for i in range(self.NUM_CHANNELS):
@@ -683,7 +739,7 @@ class PressureVINTPeripheral:
                 return True  # already open; caller must close() first to re-open
             try:
                 if self.server_hostname:
-                    self._server_name = _server_acquire(
+                    self._server_name = _shared_server_acquire(
                         self.server_hostname, self.server_port, self.server_password, self
                     )
                 ch = VoltageRatioInput()
@@ -741,10 +797,11 @@ class PressureVINTPeripheral:
                 except Exception:
                     pass
             self._channels.clear()
-            if self._server_name:
-                sn = self._server_name
+            if not for_reconnect and self._server_name:
                 self._server_name = None
-                _server_release(sn)
+                _shared_server_release(
+                    self.server_hostname, self.server_port, self.server_password, self
+                )
 
     def _on_server_removed(self):
         """Called by the Net server-removed event handler.  Immediately clears
@@ -946,8 +1003,12 @@ def check_server_health(peripherals: dict):
             fail_count = _server_health_fail_count.get((host, port), 0) + 1
             _server_health_fail_count[(host, port)] = fail_count
             if fail_count >= _SERVER_HEALTH_FAIL_THRESHOLD:
-                # Server unreachable — force-disconnect all peripherals on this
-                # endpoint so the poll loop triggers close+open.
+                # Server unreachable — cycle the shared Net server registration
+                # once for this endpoint, then force-disconnect all peripherals
+                # on it so the poll loop reattaches each one's channels
+                # individually against the fresh connection.
+                password = getattr(periphs[0], 'server_password', '') or ''
+                _shared_server_reset(host, port, password)
                 for p in periphs:
                     try:
                         p._on_server_removed()
