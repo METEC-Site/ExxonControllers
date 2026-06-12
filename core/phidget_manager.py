@@ -874,16 +874,20 @@ def create_peripheral(config: dict):
 import socket as _socket
 
 _server_health_last: dict[tuple[str, int], float] = {}   # (host, port) -> last_check monotonic
+_server_health_fail_count: dict[tuple[str, int], int] = {}  # (host, port) -> consecutive probe failures
 _SERVER_HEALTH_INTERVAL = 3.0  # seconds between probes for the same endpoint
 _SERVER_HEALTH_TIMEOUT = 2.0   # TCP connect timeout
+_SERVER_HEALTH_FAIL_THRESHOLD = 3  # consecutive failed probes before declaring the endpoint down
 
 
 def check_server_health(peripherals: dict):
     """Probe each unique Phidget server endpoint used by the given peripherals.
 
-    For each unique (hostname, port), attempt a raw TCP connect.  If it fails,
-    call _on_server_removed() on every peripheral using that endpoint so the
-    poll loop detects the disconnect immediately.
+    For each unique (hostname, port), attempt a raw TCP connect.  If it fails
+    _SERVER_HEALTH_FAIL_THRESHOLD times in a row, call _on_server_removed() on
+    every peripheral using that endpoint so the poll loop detects the
+    disconnect.  Requiring consecutive failures avoids force-disconnecting a
+    healthy group of peripherals over a single transient probe error.
 
     Parameters
     ----------
@@ -935,13 +939,23 @@ def check_server_health(peripherals: dict):
                 pass
 
         if not reachable:
-            # Server unreachable — force-disconnect all peripherals on this
-            # endpoint so the poll loop triggers close+open immediately.
-            for p in periphs:
-                try:
-                    p._on_server_removed()
-                except Exception:
-                    pass
+            # Require several consecutive failed probes before acting, so a
+            # single transient connect error (e.g. a momentary local socket
+            # abort) doesn't force-disconnect every peripheral on this
+            # endpoint.
+            fail_count = _server_health_fail_count.get((host, port), 0) + 1
+            _server_health_fail_count[(host, port)] = fail_count
+            if fail_count >= _SERVER_HEALTH_FAIL_THRESHOLD:
+                # Server unreachable — force-disconnect all peripherals on this
+                # endpoint so the poll loop triggers close+open.
+                for p in periphs:
+                    try:
+                        p._on_server_removed()
+                    except Exception:
+                        pass
+                _server_health_fail_count[(host, port)] = 0
+        else:
+            _server_health_fail_count[(host, port)] = 0
 
 
 PHIDGET_AVAILABLE_FLAG = PHIDGET_AVAILABLE
