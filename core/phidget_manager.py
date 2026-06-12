@@ -146,7 +146,13 @@ def _shared_server_reset(hostname, port, password):
     """Cycle the underlying Net server registration for (host, port, password)
     without changing its refcount.  Used by check_server_health() when an
     endpoint is confirmed unreachable, so all peripherals sharing it get a
-    fresh TCP connection via a single removeServer/addServer pair."""
+    fresh TCP connection via a single removeServer/addServer pair.
+
+    check_server_health() runs synchronously inside the gevent hub's main
+    greenlet (via DeviceManager.poll_all()), so the actual Net.addServer /
+    Net.removeServer calls — which are blocking Phidget22 C calls — are
+    dispatched to a daemon thread.  This function only updates the registry
+    (under _server_lock) and returns immediately."""
     key = (hostname, port, password)
     with _server_lock:
         entry = _shared_servers.get(key)
@@ -157,8 +163,12 @@ def _shared_server_reset(hostname, port, password):
         new_name = f"phidget_{hostname.replace('.', '_')}_{port}_g{gen}"
         entry['server_name'] = new_name
         _server_periph_map[new_name] = _server_periph_map.pop(old_name, [])
-    _add_server(new_name, hostname, port, password)
-    _remove_server_async(old_name)
+
+    def _do_cycle():
+        _add_server(new_name, hostname, port, password)
+        _remove_server_async(old_name)
+    t = threading.Thread(target=_do_cycle, daemon=True)
+    t.start()
 
 
 def _register_server_events_once():
