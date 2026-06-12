@@ -42,7 +42,7 @@ class NasRelay:
 
     @staticmethod
     def _normalise_path(raw: str) -> tuple[str, str | None]:
-        """
+        r"""
         Normalise a user-supplied path for the current OS.
         Returns (normalised_path, error_string_or_None).
 

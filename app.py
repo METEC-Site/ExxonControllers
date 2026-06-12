@@ -1882,8 +1882,12 @@ def _polling_loop():
     while True:
         loop_start = time.time()
         _poll_heartbeat[0] += 1
+        # Section timings for SLOW-cycle diagnostics — initialised up-front so
+        # they're defined even if an exception aborts the loop body early.
+        t_after_poll = t_after_mqtt = t_after_nas = loop_start
         try:
             readings = device_mgr.poll_all()
+            t_after_poll = time.time()
             if readings.get('alicat') or readings.get('peripherals'):
                 socketio.emit('readings_update', readings)
 
@@ -1893,6 +1897,7 @@ def _polling_loop():
                     device = device_mgr._alicat.get(device_id)
                     if device:
                         mqtt_relay.publish_reading(device.device_name, reading)
+            t_after_mqtt = time.time()
 
             # NAS relay — echo each device reading to CSV files.
             # Raw data is always written; experiment data is also mirrored to a
@@ -1932,6 +1937,7 @@ def _polling_loop():
                                                     tc_column_name=_tc_col,
                                                     tc_value=_tc_val,
                                                     date_nested=False)
+            t_after_nas = time.time()
 
             heartbeat_tick += 1
             if heartbeat_tick >= 5:
@@ -1976,7 +1982,15 @@ def _polling_loop():
             _diag_cycle_times.pop(0)
 
         if elapsed > 1.5:
-            _emit_log(f"[Polling] SLOW cycle: {elapsed:.2f}s", 'warning')
+            poll_dt = t_after_poll - loop_start
+            mqtt_dt = t_after_mqtt - t_after_poll
+            nas_dt = t_after_nas - t_after_mqtt
+            rest_dt = elapsed - (poll_dt + mqtt_dt + nas_dt)
+            _emit_log(
+                f"[Polling] SLOW cycle: {elapsed:.2f}s "
+                f"(poll_all={poll_dt:.2f}s mqtt={mqtt_dt:.2f}s nas={nas_dt:.2f}s rest={rest_dt:.2f}s)",
+                'warning'
+            )
 
         now = time.time()
         if now >= _diag_next_report:
