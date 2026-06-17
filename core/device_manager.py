@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from dateutil import parser as date_parser
 
-from core.alicat_device import AlicatDevice, DEVICE_CONFIGS
+from core.alicat_device import AlicatDevice, DEVICE_CONFIGS, GAS_TABLE
 from core.data_logger import RawDataLogger, ExperimentDataLogger, PeripheralDataLogger, safe_tc_column_name
 from core.phidget_manager import create_peripheral, PHIDGET_AVAILABLE_FLAG, check_server_health
 
@@ -400,10 +400,15 @@ class DeviceManager:
                     tc_peripheral_name = getattr(periph, 'name', periph_id)
                     tc_col_name = safe_tc_column_name(tc_channel_label)
 
+            gas_number = getattr(device, 'gas_number', None)
             device_meta = {
                 'device_type':        device.device_type,
-                'location':           device.device_name,
                 'serial':             getattr(device, 'serial_number', '') or '',
+                'unit_id':            getattr(device, 'unit_id', ''),
+                'gas_number':         gas_number,
+                'gas_name':           GAS_TABLE.get(gas_number, ''),
+                'max_flow':           getattr(device, 'max_flow', None),
+                'max_flow_is_fallback': getattr(device, 'max_flow_is_fallback', False),
                 'lat':                device.lat if device.lat is not None else '',
                 'lon':                device.lon if device.lon is not None else '',
                 'alt':                device.alt if device.alt is not None else '',
@@ -661,11 +666,13 @@ class DeviceManager:
         # Create a data logger for this peripheral (outside the lock — does file I/O)
         channel_labels = getattr(periph, 'channel_labels', None) or ['ch0', 'ch1', 'ch2', 'ch3']
         device_meta = {
-            'type':     cfg.get('type', ''),
-            'location': cfg.get('name', ''),
-            'hostname': cfg.get('hostname', ''),
-            'port':     cfg.get('port', ''),
-            'hub_port': cfg.get('hub_port', ''),
+            'type':        cfg.get('type', ''),
+            'hub_serial':  getattr(periph, 'hub_serial', None),
+            'hostname':    getattr(periph, 'server_hostname', '') or '',
+            'port':        getattr(periph, 'server_port', '') or '',
+            'hub_port':    cfg.get('hub_port', ''),
+            'units':       getattr(periph, 'units', None),
+            'calibration': getattr(periph, 'calibration', None),
         }
         periph_logger = PeripheralDataLogger(
             peripheral_name=getattr(periph, 'name', peripheral_id),

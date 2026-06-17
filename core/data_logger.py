@@ -170,17 +170,29 @@ class RawDataLogger:
             tc_label = meta.get('tc_channel_label', self._tc_column_name)
             tc_desc[self._tc_column_name] = f'Linked thermocouple channel "{tc_label}" (°C)'
         col_desc = {**_ALICAT_FIELD_DESCRIPTIONS, **tc_desc}
+        gas_number = meta.get('gas_number')
+        gas_name = meta.get('gas_name', '')
+        gas_str = f'{gas_name} (gas_number={gas_number})' if gas_name else f'Unknown (gas_number={gas_number})'
+        max_flow = meta.get('max_flow')
+        if max_flow is None:
+            flow_str = 'Unknown'
+        elif meta.get('max_flow_is_fallback'):
+            flow_str = f'{max_flow} SLPM (user-configured — device does not report full-scale)'
+        else:
+            flow_str = f'{max_flow} SLPM (reported by device)'
         lines = [
             '=== ExxonController Flow Controller Metadata ===',
-            f'Device Name:   {self.device_name}',
-            f'Device Type:   {meta.get("device_type", "Unknown")}',
-            f'Location:      {meta.get("location", "")}',
-            f'Serial Number: {meta.get("serial", "")}',
-            f'Latitude:      {meta.get("lat", "")} deg',
-            f'Longitude:     {meta.get("lon", "")} deg',
-            f'Altitude:      {meta.get("alt", "")} m',
-            f'File Created:  {now}',
-            f'Rotation:      {self.rotation_minutes} min',
+            f'Device Name:     {self.device_name}',
+            f'Device Type:     {meta.get("device_type", "Unknown")}',
+            f'Serial Number:   {meta.get("serial", "")}',
+            f'Modbus Unit ID:  {meta.get("unit_id", "")}',
+            f'Gas:             {gas_str}',
+            f'Full-Scale Flow: {flow_str}',
+            f'Latitude:        {meta.get("lat", "")} deg',
+            f'Longitude:       {meta.get("lon", "")} deg',
+            f'Altitude:        {meta.get("alt", "")} m',
+            f'File Created:    {now}',
+            f'Rotation:        {self.rotation_minutes} min',
             '',
             '=== Emission Point ===',
             f'EP Name:        {ep.get("display_name", "")}',
@@ -460,20 +472,28 @@ class PeripheralDataLogger:
         txt_path = os.path.splitext(csv_path)[0] + '.txt'
         now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         meta = self._device_meta
+        ptype = meta.get('type', 'Unknown')
         lines = [
             '=== ExxonController Peripheral Metadata ===',
             f'Peripheral Name: {self.peripheral_name}',
-            f'Type:            {meta.get("type", "Unknown")}',
-            f'Location:        {meta.get("location", "")}',
+            f'Type:            {ptype}',
+            f'Hub Serial:      {meta.get("hub_serial", "") or ""}',
             f'VINT Hub:        {meta.get("hostname", "")}:{meta.get("port", "")}',
             f'Hub Port:        {meta.get("hub_port", "")}',
+        ]
+        if ptype == 'pressure_vint':
+            scale, offset = meta.get('calibration') or (1.0, 0.0)
+            lines += [
+                f'Units:           {meta.get("units", "")}',
+                f'Calibration:     scale={scale}, offset={offset}',
+            ]
+        lines += [
             f'File Created:    {now}',
             '',
             '=== Column Descriptions ===',
             '  timestamp_utc: Timestamp (UTC, ISO 8601)',
         ] + [
-            f'  {fn}: State of channel "{lbl}" '
-            f'(relay: 1=energised/open, 0=de-energised/closed; thermocouple: °C)'
+            self._channel_description(ptype, fn, lbl, meta)
             for fn, lbl in zip(self._fieldnames[1:], self._channel_labels)
         ]
         try:
@@ -481,6 +501,18 @@ class PeripheralDataLogger:
                 f.write('\n'.join(lines) + '\n')
         except OSError:
             pass
+
+    @staticmethod
+    def _channel_description(ptype, fieldname, label, meta):
+        if ptype == 'thermocouple':
+            return f'  {fieldname}: Temperature reading from channel "{label}" (°C)'
+        if ptype in ('relay', 'relay_mechanical'):
+            return (f'  {fieldname}: Relay state for channel "{label}" '
+                    f'(1=energised/open, 0=de-energised/closed)')
+        if ptype == 'pressure_vint':
+            units = meta.get('units', '')
+            return f'  {fieldname}: Pressure reading from channel "{label}" ({units})'
+        return f'  {fieldname}: State of channel "{label}"'
 
     def log(self, timestamp: str, channel_values: list):
         self._rotate()
