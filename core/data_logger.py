@@ -61,6 +61,27 @@ _ALICAT_FIELD_DESCRIPTIONS = {
 }
 
 
+def format_gas_info(meta: dict) -> str:
+    """Human-readable gas description for a flow-controller metadata dict.
+    Shared by RawDataLogger and NasRelay so both sidecars agree."""
+    gas_number = meta.get('gas_number')
+    gas_name = meta.get('gas_name', '')
+    if gas_name:
+        return f'{gas_name} (gas_number={gas_number})'
+    return f'Unknown (gas_number={gas_number})'
+
+
+def format_max_flow_info(meta: dict) -> str:
+    """Human-readable full-scale flow description for a flow-controller
+    metadata dict. Shared by RawDataLogger and NasRelay so both sidecars agree."""
+    max_flow = meta.get('max_flow')
+    if max_flow is None:
+        return 'Unknown'
+    if meta.get('max_flow_is_fallback'):
+        return f'{max_flow} SLPM (user-configured — device does not report full-scale)'
+    return f'{max_flow} SLPM (reported by device)'
+
+
 def _round_value(v, places):
     """Round a value to `places` decimal places; return as-is if not numeric."""
     if v in ('', None):
@@ -170,27 +191,14 @@ class RawDataLogger:
             tc_label = meta.get('tc_channel_label', self._tc_column_name)
             tc_desc[self._tc_column_name] = f'Linked thermocouple channel "{tc_label}" (°C)'
         col_desc = {**_ALICAT_FIELD_DESCRIPTIONS, **tc_desc}
-        gas_number = meta.get('gas_number')
-        gas_name = meta.get('gas_name', '')
-        gas_str = f'{gas_name} (gas_number={gas_number})' if gas_name else f'Unknown (gas_number={gas_number})'
-        max_flow = meta.get('max_flow')
-        if max_flow is None:
-            flow_str = 'Unknown'
-        elif meta.get('max_flow_is_fallback'):
-            flow_str = f'{max_flow} SLPM (user-configured — device does not report full-scale)'
-        else:
-            flow_str = f'{max_flow} SLPM (reported by device)'
         lines = [
             '=== ExxonController Flow Controller Metadata ===',
             f'Device Name:     {self.device_name}',
             f'Device Type:     {meta.get("device_type", "Unknown")}',
             f'Serial Number:   {meta.get("serial", "")}',
             f'Modbus Unit ID:  {meta.get("unit_id", "")}',
-            f'Gas:             {gas_str}',
-            f'Full-Scale Flow: {flow_str}',
-            f'Latitude:        {meta.get("lat", "")} deg',
-            f'Longitude:       {meta.get("lon", "")} deg',
-            f'Altitude:        {meta.get("alt", "")} m',
+            f'Gas:             {format_gas_info(meta)}',
+            f'Full-Scale Flow: {format_max_flow_info(meta)}',
             f'File Created:    {now}',
             f'Rotation:        {self.rotation_minutes} min',
             '',

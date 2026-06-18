@@ -1915,13 +1915,8 @@ def _polling_loop():
                         ep = ep_mgr.get_ep(ep_id) or {}
                         _serial = getattr(device, 'serial_number', '') or ''
                         _ep_name = ep.get('display_name', 'TEST')
-                        _nas_meta = {
-                            'device_type': device.device_type,
-                            'lat': device.lat if device.lat is not None else '',
-                            'lon': device.lon if device.lon is not None else '',
-                            'alt': device.alt if device.alt is not None else '',
-                            'ep_info': ep,
-                        }
+                        # Shared with RawDataLogger's sidecar so the two never drift apart.
+                        _nas_meta = device_mgr.build_device_meta(device, ep)
                         _tc_col = reading.get('_tc_column')
                         _tc_val = reading.get('_tc_value')
                         nas_relay.write_reading(device.device_name, reading,

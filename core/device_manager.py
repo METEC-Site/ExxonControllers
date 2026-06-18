@@ -363,6 +363,50 @@ class DeviceManager:
             gevent.get_hub().threadpool.spawn(periph.open)
         return {'success': True, 'disabled': disabled}
 
+    def _resolve_tc_info(self, ep_info: dict):
+        """Resolve the linked thermocouple peripheral/channel for an emission
+        point's temperature_source. Returns (tc_col_name, tc_channel_label,
+        tc_peripheral_name) — all empty/None if no temperature source is linked."""
+        tc_col_name = None
+        tc_channel_label = ''
+        tc_peripheral_name = ''
+        ts = ep_info.get('temperature_source') if ep_info else None
+        if ts:
+            periph_id = ts.get('peripheral_id', '')
+            ch = ts.get('channel', 0)
+            periph = self._peripherals.get(periph_id)
+            if periph:
+                labels = getattr(periph, 'channel_labels', None) or []
+                tc_channel_label = labels[ch] if ch < len(labels) else f'CH{ch}'
+                tc_peripheral_name = getattr(periph, 'name', periph_id)
+                tc_col_name = safe_tc_column_name(tc_channel_label)
+        return tc_col_name, tc_channel_label, tc_peripheral_name
+
+    def build_device_meta(self, device, ep_info: dict) -> dict:
+        """Build the metadata dict shared by the raw CSV logger and the NAS
+        relay sidecar, so both always show the same flow-controller info
+        instead of drifting apart. GPS lat/lon/alt is intentionally omitted
+        here — it's shown once under '=== Emission Point ===' rather than
+        duplicated per-device, since a device's location is just a cached
+        copy of its assigned EP's location, not something that moves on its
+        own (the EP is what gets relocated)."""
+        tc_col_name, tc_channel_label, tc_peripheral_name = self._resolve_tc_info(ep_info)
+        gas_number = getattr(device, 'gas_number', None)
+        return {
+            'device_type':          device.device_type,
+            'serial':                getattr(device, 'serial_number', '') or '',
+            'unit_id':               getattr(device, 'unit_id', ''),
+            'gas_number':            gas_number,
+            'gas_name':              GAS_TABLE.get(gas_number, ''),
+            'max_flow':              getattr(device, 'max_flow', None),
+            'max_flow_is_fallback':  getattr(device, 'max_flow_is_fallback', False),
+            'ep_display_name':       ep_info.get('display_name', 'TEST'),
+            'ep_info':               ep_info,
+            'tc_channel_label':      tc_channel_label,
+            'tc_peripheral_name':    tc_peripheral_name,
+            'tc_column_name':        tc_col_name,
+        }
+
     def start_device(self, device_id: str) -> dict:
         """Start raw data logging for a device (daily-rotating CSV in Data/Raw/)."""
         with self._lock:
@@ -385,41 +429,10 @@ class DeviceManager:
                 if ep:
                     ep_info = ep
 
-            # Determine linked thermocouple channel for combined logging
-            tc_col_name = None
-            tc_channel_label = ''
-            tc_peripheral_name = ''
-            ts = ep_info.get('temperature_source') if ep_info else None
-            if ts:
-                periph_id = ts.get('peripheral_id', '')
-                ch = ts.get('channel', 0)
-                periph = self._peripherals.get(periph_id)
-                if periph:
-                    labels = getattr(periph, 'channel_labels', None) or []
-                    tc_channel_label = labels[ch] if ch < len(labels) else f'CH{ch}'
-                    tc_peripheral_name = getattr(periph, 'name', periph_id)
-                    tc_col_name = safe_tc_column_name(tc_channel_label)
-
-            gas_number = getattr(device, 'gas_number', None)
-            device_meta = {
-                'device_type':        device.device_type,
-                'serial':             getattr(device, 'serial_number', '') or '',
-                'unit_id':            getattr(device, 'unit_id', ''),
-                'gas_number':         gas_number,
-                'gas_name':           GAS_TABLE.get(gas_number, ''),
-                'max_flow':           getattr(device, 'max_flow', None),
-                'max_flow_is_fallback': getattr(device, 'max_flow_is_fallback', False),
-                'lat':                device.lat if device.lat is not None else '',
-                'lon':                device.lon if device.lon is not None else '',
-                'alt':                device.alt if device.alt is not None else '',
-                'ep_display_name':    ep_info.get('display_name', 'TEST'),
-                'ep_info':            ep_info,
-                'tc_channel_label':   tc_channel_label,
-                'tc_peripheral_name': tc_peripheral_name,
-            }
+            device_meta = self.build_device_meta(device, ep_info)
             logger = RawDataLogger(device_name=device.device_name, data_dir=RAW_DATA_DIR,
                                    rotation_minutes=rotation_minutes, device_meta=device_meta,
-                                   tc_column_name=tc_col_name)
+                                   tc_column_name=device_meta['tc_column_name'])
             self._raw_loggers[device_id] = logger
             self._running[device_id] = True
 

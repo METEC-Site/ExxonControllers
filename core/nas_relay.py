@@ -12,6 +12,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from core.data_logger import format_gas_info, format_max_flow_info
+
 # Reading-dict keys (match what device_manager puts in the readings dict)
 _RELAY_KEYS   = ['pressure', 'temperature', 'vol_flow', 'mass_flow', 'setpoint', 'accumulated_sl']
 # CSV column names with units
@@ -282,13 +284,13 @@ class NasRelay:
         ep = meta.get('ep_info') or {}
         lines = [
             '=== ExxonController NAS Echo Metadata ===',
-            f'Device Name:   {device_name}',
-            f'Device Type:   {meta.get("device_type", "")}',
-            f'Serial Number: {serial}',
-            f'Latitude:      {meta.get("lat", "")} deg',
-            f'Longitude:     {meta.get("lon", "")} deg',
-            f'Altitude:      {meta.get("alt", "")} m',
-            f'File Created:  {now}',
+            f'Device Name:     {device_name}',
+            f'Device Type:     {meta.get("device_type", "")}',
+            f'Serial Number:   {serial}',
+            f'Modbus Unit ID:  {meta.get("unit_id", "")}',
+            f'Gas:             {format_gas_info(meta)}',
+            f'Full-Scale Flow: {format_max_flow_info(meta)}',
+            f'File Created:    {now}',
             '',
             '=== Emission Point ===',
             f'EP Name:        {ep.get("display_name", ep_name)}',
