@@ -178,7 +178,11 @@ class RawDataLogger:
         self._current_period = key   # only committed after open() succeeds
         if is_new:
             self._writer.writeheader()
-            self._write_metadata_txt(path)
+        # Always (re)write the metadata sidecar, even for a file we're just
+        # continuing to append to — it's a descriptive snapshot, not part of
+        # the data stream, so refreshing it on every (re)start keeps it in
+        # sync with the current code/device state instead of going stale.
+        self._write_metadata_txt(path)
         self._row_count = 0
 
     def _write_metadata_txt(self, csv_path):
@@ -473,7 +477,8 @@ class PeripheralDataLogger:
         self._current_day = key   # only committed after open() succeeds
         if is_new:
             self._writer.writeheader()
-            self._write_metadata_txt(path)
+        # Always (re)write the metadata sidecar — see RawDataLogger._rotate().
+        self._write_metadata_txt(path)
         self._row_count = 0
 
     def _write_metadata_txt(self, csv_path):

@@ -192,7 +192,7 @@ class NasRelay:
         with self._lock:
             if not self._enabled:
                 return
-            writer, needs_header, new_file_path = self._get_writer(
+            writer, needs_header, opened_file_path = self._get_writer(
                 file_key, safe_name, safe_serial, safe_ep, date_str, subdir, date_nested)
             if writer is None:
                 return
@@ -209,9 +209,11 @@ class NasRelay:
                 del self._open_files[file_key]
                 return
 
-        # Write metadata sidecar outside the lock (file I/O, not performance-critical)
-        if needs_header and new_file_path:
-            self._write_metadata_txt(new_file_path, device_name, serial, ep_name,
+        # Write metadata sidecar outside the lock (file I/O, not performance-critical).
+        # Refreshed on the first write to this file each run — even if the CSV
+        # already existed from a previous run — so it never goes stale across restarts.
+        if opened_file_path:
+            self._write_metadata_txt(opened_file_path, device_name, serial, ep_name,
                                      meta or {}, tc_column_name)
 
     def _check_accessible(self) -> bool | None:
@@ -249,7 +251,14 @@ class NasRelay:
     def _get_writer(self, file_key: str, safe_name: str, safe_serial: str,
                     safe_ep: str, date_str: str, subdir: str | None = None,
                     date_nested: bool = True):
-        """Return (writer, needs_header, file_path_if_new). Caller must hold self._lock."""
+        """Return (writer, needs_header, file_path_if_just_opened).
+
+        file_path_if_just_opened is set the first time this file is opened in
+        this process — whether or not the CSV already existed on disk from a
+        previous run — so the caller can refresh the metadata sidecar on
+        every restart. needs_header is only true when the CSV itself is
+        brand new, since writing the header twice would corrupt the file.
+        Caller must hold self._lock."""
         if file_key in self._open_files:
             return self._open_files[file_key][1], False, None
 
@@ -271,7 +280,7 @@ class NasRelay:
             fh = open(file_path, 'a', newline='', encoding='utf-8')
             writer = csv.writer(fh)
             self._open_files[file_key] = (fh, writer)
-            return writer, needs_header, (file_path if needs_header else None)
+            return writer, needs_header, file_path
         except OSError:
             return None, False, None
 
