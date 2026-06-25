@@ -1171,12 +1171,39 @@ class DeviceManager:
                     # Skip if a previous _try_reopen is still in flight.
                     if peripheral_id not in self._periph_reconnecting:
                         self._periph_reconnecting.add(peripheral_id)
-                        def _try_reopen(p=periph, pid=peripheral_id):
+                        def _try_reopen(p=periph, pid=peripheral_id, _cycle_start=now_mono):
+                            # Timed + thread-identified so a slow periph_main phase can be
+                            # traced to whether these Phidget22 close()/open() calls ran
+                            # concurrently on separate OS threads (as intended) or ended up
+                            # serialised — e.g. because the C extension doesn't release the
+                            # GIL during its own blocking network calls, which would stall
+                            # the main poll greenlet too even though this runs on a
+                            # threadpool worker, not a greenlet.
+                            t_start = time.time()
+                            tid = threading.get_ident()
+                            name = getattr(p, 'name', pid)
+                            print(
+                                f"[Reopen] => {name} starting on thread {tid} "
+                                f"({t_start - _cycle_start:.2f}s into this poll cycle)",
+                                flush=True,
+                            )
                             try:
                                 p.close(for_reconnect=True)
+                                t_closed = time.time()
                                 p.open()
-                            except BaseException:
-                                pass
+                                t_opened = time.time()
+                                print(
+                                    f"[Reopen] <= {name} done on thread {tid} "
+                                    f"close={t_closed - t_start:.2f}s open={t_opened - t_closed:.2f}s "
+                                    f"total={t_opened - t_start:.2f}s",
+                                    flush=True,
+                                )
+                            except BaseException as e:
+                                print(
+                                    f"[Reopen] <= {name} error on thread {tid} "
+                                    f"after {time.time() - t_start:.2f}s: {e}",
+                                    flush=True,
+                                )
                             finally:
                                 self._periph_reconnecting.discard(pid)
                         gevent.get_hub().threadpool.spawn(_try_reopen)
