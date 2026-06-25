@@ -12,7 +12,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from core.data_logger import format_gas_info, format_max_flow_info
+from core.data_logger import format_gas_info, format_max_flow_info, _clear_readonly
 
 # Reading-dict keys (match what device_manager puts in the readings dict)
 _RELAY_KEYS   = ['pressure', 'temperature', 'vol_flow', 'mass_flow', 'setpoint', 'accumulated_sl']
@@ -35,6 +35,14 @@ class NasRelay:
         self._open_files: dict[str, tuple] = {}   # key → (file_obj, csv_writer)
         self._probe_ok: bool | None = None        # None = not yet checked
         self._probe_ts: float = 0.0               # monotonic time of last probe
+        self._last_error_log: float = 0.0
+
+    def _warn(self, msg: str) -> None:
+        """Rate-limited (once/minute) warning print — see RawDataLogger._warn()."""
+        now = time.monotonic()
+        if now - self._last_error_log >= 60.0:
+            self._last_error_log = now
+            print(f"[NasRelay] WARNING: {msg}", flush=True)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -201,11 +209,14 @@ class NasRelay:
             writer.writerow(row)
             try:
                 self._open_files[file_key][0].flush()
-            except OSError:
+            except OSError as e:
+                self._warn(f"flush failed for {device_name}'s NAS file ({file_key}): {e}")
                 try:
                     self._open_files[file_key][0].close()
                 except OSError:
                     pass
+                # Drop the cached handle so the next write re-opens fresh (and
+                # re-clears the read-only attribute if that's what caused this).
                 del self._open_files[file_key]
                 return
 
@@ -276,12 +287,14 @@ class NasRelay:
         file_path = os.path.join(
             dest_dir, f'{safe_name}_{safe_serial}_{safe_ep}_{date_str}.csv')
         needs_header = not os.path.exists(file_path)
+        _clear_readonly(file_path)
         try:
             fh = open(file_path, 'a', newline='', encoding='utf-8')
             writer = csv.writer(fh)
             self._open_files[file_key] = (fh, writer)
             return writer, needs_header, file_path
-        except OSError:
+        except OSError as e:
+            self._warn(f"cannot open NAS file ({file_path}): {e}")
             return None, False, None
 
     def _write_metadata_txt(self, csv_path: str, device_name: str,
@@ -331,11 +344,12 @@ class NasRelay:
         if tc_column_name:
             tc_label = meta.get('tc_channel_label', tc_column_name)
             lines.append(f'  {tc_column_name}: Linked thermocouple channel "{tc_label}" (°C)')
+        _clear_readonly(txt_path)
         try:
             with open(txt_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
-        except OSError:
-            pass
+        except OSError as e:
+            self._warn(f"cannot write metadata sidecar for {device_name} ({txt_path}): {e}")
 
     def _close_all(self):
         """Close all open file handles. Caller must hold self._lock."""

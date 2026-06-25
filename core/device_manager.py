@@ -21,7 +21,7 @@ from dateutil import parser as date_parser
 
 from core.alicat_device import AlicatDevice, DEVICE_CONFIGS, GAS_TABLE
 from core.data_logger import RawDataLogger, ExperimentDataLogger, PeripheralDataLogger, safe_tc_column_name
-from core.phidget_manager import create_peripheral, PHIDGET_AVAILABLE_FLAG, check_server_health
+from core.phidget_manager import create_peripheral, PHIDGET_AVAILABLE_FLAG, check_server_health, _shared_server_reset
 
 
 try:
@@ -31,6 +31,13 @@ except NameError:
     _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DATA_DIR = os.path.join(_BASE_DIR, 'Data', 'Raw')
 HISTORY_MAXLEN = 3600   # 1 hour at 1 Hz
+
+# How long a connection-lost transition must persist before the operator sees
+# a toast popup for it.  Detection/reconnect logic itself is unaffected — this
+# only filters which transitions are worth interrupting the operator about, so
+# a brief network blip that self-heals doesn't generate a connection-lost /
+# reconnected pair of popups every time it happens.
+CONNECTION_TOAST_GRACE_S = 5.0
 
 
 class DeviceManager:
@@ -72,6 +79,9 @@ class DeviceManager:
 
         self._auto_log_last_started: dict[str, float] = {}  # device_id -> epoch of last auto-start_device call
         self._in_experiment_devices: set[str] = set()        # device_ids currently owned by a running experiment
+
+        self._toast_gen: dict[str, int] = {}                 # debounce key -> generation counter
+        self._toast_shown: dict[str, bool] = {}              # debounce key -> was a "lost" toast actually shown
 
         self._lock = threading.Lock()
 
@@ -821,11 +831,10 @@ class DeviceManager:
         prev_connected = self._was_connected.get(device_id)
 
         if curr_connected != prev_connected and prev_connected is not None:
+            self._debounced_toast(f'alicat:{device_id}', device.device_name, curr_connected)
             if curr_connected:
-                self.socketio.emit('toast', {'message': f'{device.device_name} reconnected', 'type': 'success'})
                 self.socketio.emit('server_log', {'msg': f'[Device] {device.device_name} reconnected', 'level': 'info', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
             else:
-                self.socketio.emit('toast', {'message': f'{device.device_name} connection lost', 'type': 'warning'})
                 self.socketio.emit('server_log', {'msg': f'[Device] {device.device_name} connection lost', 'level': 'warning', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
             self.socketio.emit('device_update', self.get_device_state(device_id))
 
@@ -858,7 +867,7 @@ class DeviceManager:
         if reading is None:
             if device.connected != curr_connected:
                 self._was_connected[device_id] = device.connected
-                self.socketio.emit('toast', {'message': f'{device.device_name} connection lost', 'type': 'warning'})
+                self._debounced_toast(f'alicat:{device_id}', device.device_name, device.connected)
                 self.socketio.emit('server_log', {'msg': f'[Device] {device.device_name} connection lost (read timeout)', 'level': 'warning', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
                 self.socketio.emit('device_update', self.get_device_state(device_id))
             return device_id, None
@@ -1039,7 +1048,15 @@ class DeviceManager:
             # whatever its internal state reset to during the outage.
             just_reconnected = self._last_read_ok.get(device_id) == False
             self._last_read_ok[device_id] = True
-            self._tick_schedule(device_id, force_resend=just_reconnected)
+            resent = self._tick_schedule(device_id, force_resend=just_reconnected)
+            if just_reconnected:
+                sched = self._schedules.get(device_id)
+                print(
+                    f"[Setpoint] {device.device_name} reconnected — force-resend "
+                    f"resent={resent} schedule_running={bool(sched and sched.get('running'))} "
+                    f"target={sched.get('current_setpoint') if sched else None}",
+                    flush=True,
+                )
 
             hist = self._histories[device_id]
             if len(hist) % 10 == 0 and self._running.get(device_id):
@@ -1060,8 +1077,39 @@ class DeviceManager:
         # disconnected.
         check_server_health(self._peripherals)
 
+        # Fast path: if every peripheral sharing a (host, port, password) endpoint
+        # just went connected -> disconnected together in this same cycle, that's
+        # a direct signal the shared Net connection itself died — cycle it right
+        # away instead of waiting on check_server_health's independent TCP-probe
+        # debounce.  That debounce only probes while at least one peripheral on
+        # the endpoint still thinks it's connected (see check_server_health), so
+        # for a sudden all-at-once drop it never even gets the chance to fire —
+        # this closes exactly that gap.
+        pstates: dict[str, dict] = {}
+        endpoint_groups: dict[tuple, list[str]] = {}
+        endpoint_just_dropped: dict[tuple, bool] = {}
         for peripheral_id, periph in list(self._peripherals.items()):
+            if self._periph_disabled.get(peripheral_id):
+                continue
             pstate = periph.get_state()
+            pstates[peripheral_id] = pstate
+            host = getattr(periph, 'server_hostname', None)
+            if not host:
+                continue
+            key = (host, getattr(periph, 'server_port', 5661),
+                   getattr(periph, 'server_password', '') or '')
+            endpoint_groups.setdefault(key, []).append(peripheral_id)
+            if (self._periph_was_opened.get(peripheral_id) is True
+                    and not pstate.get('connected', False)):
+                endpoint_just_dropped[key] = True
+
+        for key, peripheral_ids in endpoint_groups.items():
+            if endpoint_just_dropped.get(key) and all(
+                    not pstates[pid].get('connected', False) for pid in peripheral_ids):
+                _shared_server_reset(*key)
+
+        for peripheral_id, periph in list(self._peripherals.items()):
+            pstate = pstates.get(peripheral_id) or periph.get_state()
 
             # Skip disabled peripherals — emit static state but no reconnect
             if self._periph_disabled.get(peripheral_id):
@@ -1076,11 +1124,10 @@ class DeviceManager:
             prev_connected = self._periph_was_opened.get(peripheral_id)
 
             if prev_connected is not None and curr_connected != prev_connected:
+                self._debounced_toast(f'periph:{peripheral_id}', f'Peripheral {periph.name}', curr_connected)
                 if curr_connected:
-                    self.socketio.emit('toast', {'message': f'Peripheral {periph.name} reconnected', 'type': 'success'})
                     self.socketio.emit('server_log', {'msg': f'[Peripheral] {periph.name} connected', 'level': 'info', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
                 else:
-                    self.socketio.emit('toast', {'message': f'Peripheral {periph.name} connection lost', 'type': 'warning'})
                     self.socketio.emit('server_log', {'msg': f'[Peripheral] {periph.name} connection lost', 'level': 'warning', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
                 self.socketio.emit('peripheral_update', pstate)
 
@@ -1144,6 +1191,35 @@ class DeviceManager:
                     pass
 
         return readings
+
+    def _debounced_toast(self, key: str, label: str, curr_connected: bool):
+        """Suppress connect/disconnect *toast popups* for transitions shorter
+        than CONNECTION_TOAST_GRACE_S, so a brief network blip that resolves on
+        its own doesn't interrupt the operator with a connection-lost /
+        reconnected pair every time it happens.
+
+        This only gates the toast — device_update/peripheral_update and
+        server_log entries are emitted immediately by the caller regardless,
+        so the UI's connected/disconnected indicator and the log history stay
+        accurate in real time; only the popup notification is delayed.
+
+        key   : a debounce identity, e.g. f'alicat:{device_id}' or f'periph:{peripheral_id}'.
+        label : display text used in the toast message, e.g. device.device_name
+                or f'Peripheral {periph.name}'.
+        """
+        gen = self._toast_gen.get(key, 0) + 1
+        self._toast_gen[key] = gen
+        if not curr_connected:
+            def _show_lost_toast():
+                if self._toast_gen.get(key) != gen:
+                    return  # superseded by a newer transition before the grace period elapsed
+                self._toast_shown[key] = True
+                self.socketio.emit('toast', {'message': f'{label} connection lost', 'type': 'warning'})
+            gevent.spawn_later(CONNECTION_TOAST_GRACE_S, _show_lost_toast)
+        else:
+            if self._toast_shown.get(key):
+                self.socketio.emit('toast', {'message': f'{label} reconnected', 'type': 'success'})
+            self._toast_shown[key] = False
 
     def _check_serial_mismatch(self, device: AlicatDevice):
         """Emit a warning toast if the device's reported serial doesn't match expected."""

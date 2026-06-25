@@ -15,9 +15,28 @@ Structure:
 import csv
 import json
 import os
+import stat
 import threading
 import time
 from datetime import datetime, timezone
+
+
+def _clear_readonly(path: str) -> None:
+    """Best-effort: clear the read-only attribute on `path` if present, so an
+    external process (a NAS antivirus/backup/snapshot job, a stale SMB
+    session, etc.) flipping it doesn't permanently block this app from
+    continuing to write.  No-op if the path doesn't exist yet (new file) or
+    the chmod itself fails — callers still need their own open()/except
+    OSError handling for the case this can't fix."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    if not (st.st_mode & stat.S_IWRITE):
+        try:
+            os.chmod(path, st.st_mode | stat.S_IWRITE | stat.S_IWUSR)
+        except OSError:
+            pass
 
 
 # ── Shared field definitions ───────────────────────────────────────────────────
@@ -145,8 +164,17 @@ class RawDataLogger:
         self._writer = None
         self._current_period = None
         self._row_count = 0
+        self._last_error_log = 0.0
         os.makedirs(data_dir, exist_ok=True)
         self._rotate()
+
+    def _warn(self, msg: str) -> None:
+        """Rate-limited (once/minute) warning print — a write failure here means
+        lost data, but printing it every poll cycle would just spam the console."""
+        now = time.monotonic()
+        if now - self._last_error_log >= 60.0:
+            self._last_error_log = now
+            print(f"[RawDataLogger] WARNING: {msg}", flush=True)
 
     def _period_key(self, now=None):
         """Return the filename suffix for the current rotation window."""
@@ -173,11 +201,18 @@ class RawDataLogger:
         fname = f"{self._safe_name}_{self._safe_serial}_{self._safe_ep_name}_{key}.csv"
         path = os.path.join(date_dir, fname)
         is_new = not os.path.exists(path)
-        self._file = open(path, 'a', newline='')   # may raise; _current_period unchanged
-        self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
-        self._current_period = key   # only committed after open() succeeds
-        if is_new:
-            self._writer.writeheader()
+        _clear_readonly(path)
+        try:
+            self._file = open(path, 'a', newline='')
+            self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
+            self._current_period = key   # only committed after open() succeeds
+            if is_new:
+                self._writer.writeheader()
+        except OSError as e:
+            self._warn(f"cannot open raw data file for {self.device_name} ({path}): {e}")
+            self._file = None
+            self._writer = None
+            return
         # Always (re)write the metadata sidecar, even for a file we're just
         # continuing to append to — it's a descriptive snapshot, not part of
         # the data stream, so refreshing it on every (re)start keeps it in
@@ -225,14 +260,17 @@ class RawDataLogger:
             '',
             '=== Column Descriptions ===',
         ] + [f'  {col}: {col_desc.get(col, col)}' for col in self._fieldnames]
+        _clear_readonly(txt_path)
         try:
             with open(txt_path, 'w') as f:
                 f.write('\n'.join(lines) + '\n')
-        except OSError:
-            pass
+        except OSError as e:
+            self._warn(f"cannot write metadata sidecar for {self.device_name} ({txt_path}): {e}")
 
     def log(self, reading: dict, tc_value=None):
         self._rotate()
+        if self._writer is None:
+            return  # file unavailable (e.g. read-only on the NAS) — already warned in _rotate()
         row = {}
         for col, key, places in _RAW_FIELD_MAP:
             v = reading.get(key, '')
@@ -250,8 +288,12 @@ class RawDataLogger:
         try:
             if self._file and not self._file.closed:
                 self._file.flush()
-        except OSError:
-            pass
+        except OSError as e:
+            self._warn(f"flush failed for {self.device_name}'s raw data file: {e}")
+            # Force a fresh open (with a read-only-clearing attempt) on the next
+            # log() call, in case the file was flipped read-only mid-session.
+            self._current_period = None
+            self._close_file()
 
     def _close_file(self):
         try:
@@ -455,8 +497,16 @@ class PeripheralDataLogger:
         self._writer = None
         self._current_day = None
         self._row_count = 0
+        self._last_error_log = 0.0
         os.makedirs(data_dir, exist_ok=True)
         self._rotate()
+
+    def _warn(self, msg: str) -> None:
+        """Rate-limited (once/minute) warning print — see RawDataLogger._warn()."""
+        now = time.monotonic()
+        if now - self._last_error_log >= 60.0:
+            self._last_error_log = now
+            print(f"[PeripheralDataLogger] WARNING: {msg}", flush=True)
 
     def _rotate(self):
         now = datetime.now(timezone.utc)
@@ -472,11 +522,18 @@ class PeripheralDataLogger:
         fname = f"peripheral_{self._safe_name}_{key}.csv"
         path = os.path.join(date_dir, fname)
         is_new = not os.path.exists(path)
-        self._file = open(path, 'a', newline='')   # may raise; _current_day unchanged
-        self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
-        self._current_day = key   # only committed after open() succeeds
-        if is_new:
-            self._writer.writeheader()
+        _clear_readonly(path)
+        try:
+            self._file = open(path, 'a', newline='')
+            self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
+            self._current_day = key   # only committed after open() succeeds
+            if is_new:
+                self._writer.writeheader()
+        except OSError as e:
+            self._warn(f"cannot open peripheral data file for {self.peripheral_name} ({path}): {e}")
+            self._file = None
+            self._writer = None
+            return
         # Always (re)write the metadata sidecar — see RawDataLogger._rotate().
         self._write_metadata_txt(path)
         self._row_count = 0
@@ -509,11 +566,12 @@ class PeripheralDataLogger:
             self._channel_description(ptype, fn, lbl, meta)
             for fn, lbl in zip(self._fieldnames[1:], self._channel_labels)
         ]
+        _clear_readonly(txt_path)
         try:
             with open(txt_path, 'w') as f:
                 f.write('\n'.join(lines) + '\n')
-        except OSError:
-            pass
+        except OSError as e:
+            self._warn(f"cannot write metadata sidecar for {self.peripheral_name} ({txt_path}): {e}")
 
     @staticmethod
     def _channel_description(ptype, fieldname, label, meta):
@@ -529,6 +587,8 @@ class PeripheralDataLogger:
 
     def log(self, timestamp: str, channel_values: list):
         self._rotate()
+        if self._writer is None:
+            return  # file unavailable (e.g. read-only on the NAS) — already warned in _rotate()
         row = {'timestamp_utc': timestamp}
         for fn, v in zip(self._fieldnames[1:], channel_values):
             if v is None:
@@ -548,8 +608,10 @@ class PeripheralDataLogger:
         try:
             if self._file and not self._file.closed:
                 self._file.flush()
-        except OSError:
-            pass
+        except OSError as e:
+            self._warn(f"flush failed for {self.peripheral_name}'s data file: {e}")
+            self._current_day = None
+            self._close_file()
 
     def _close_file(self):
         try:

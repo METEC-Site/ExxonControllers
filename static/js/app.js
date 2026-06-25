@@ -10,6 +10,50 @@
 // _applyLogFilter / setLogLevel functions below.
 let _logLevelFilter = 'all';
 
+// ── Global fetch hardening ───────────────────────────────────────────────────
+// This network is known to drop all traffic for a few seconds at a time.
+// Without a timeout, a fetch() call in flight during one of those drops can
+// hang indefinitely with no visible feedback — looking exactly like a button
+// "did nothing". This wraps the global fetch so any request that doesn't
+// resolve within FETCH_TIMEOUT_MS aborts with a clear error, and adds a
+// safety-net toast for any fetch rejection that the calling code doesn't
+// already handle itself (most call sites already show their own error via
+// try/catch — this only catches the ones that don't, so nothing fails silently).
+(() => {
+  const FETCH_TIMEOUT_MS = 20000;
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (resource, options = {}) {
+    if (options.signal) return _origFetch(resource, options);  // caller manages its own abort
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    return _origFetch(resource, { ...options, signal: controller.signal })
+      .finally(() => clearTimeout(timer))
+      .catch(err => {
+        if (err.name === 'AbortError') {
+          throw new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${resource}`);
+        }
+        throw err;
+      });
+  };
+
+  window.addEventListener('unhandledrejection', (event) => {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    const msg = event.reason?.message || String(event.reason);
+    const el = document.createElement('div');
+    el.className = 'toast ec-toast align-items-center show';
+    el.setAttribute('role', 'alert');
+    el.innerHTML = `
+      <div class="d-flex align-items-center gap-2 p-2">
+        <i class="fa fa-triangle-exclamation" style="color:#d29922"></i>
+        <div class="toast-body p-0 flex-grow-1">Request failed: ${msg}</div>
+        <button type="button" class="btn-close btn-close-white ms-2" onclick="this.closest('.toast').remove()"></button>
+      </div>`;
+    container.appendChild(el);
+    setTimeout(() => el.remove(), 8000);
+  });
+})();
+
 const app = (() => {
 
   // ── SocketIO Connection ───────────────────────────────────────────────────
