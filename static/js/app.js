@@ -1064,6 +1064,11 @@ const app = (() => {
     if (!strip || strip.classList.contains('d-none')) return;
     const led = strip.querySelector(`[data-led-id="${id}"]`);
     if (!led) return;
+    // Skip the "fresh data" pulse while disconnected — a green flash inside a
+    // dot that's currently red is confusing, not reassuring. Staying solid
+    // red is more accurate, and the pulse resuming the moment it reconnects
+    // becomes a useful "it's back" cue instead of constant background noise.
+    if (led.classList.contains('led-disconnected')) return;
     led.classList.remove('led-pulse');
     // Reflow to restart animation
     void led.offsetWidth;

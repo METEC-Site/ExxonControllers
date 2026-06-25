@@ -1068,6 +1068,8 @@ class DeviceManager:
                 if sched and sched.get('running') and sched.get('current_setpoint') is not None:
                     device.set_flow_rate(sched['current_setpoint'])
 
+        t_alicat = time.time()
+
         # Server-level health check: probe each unique Phidget server endpoint
         # with a raw TCP connect.  If unreachable, immediately force-disconnect
         # all peripherals on that server so the poll loop triggers close+open.
@@ -1076,6 +1078,8 @@ class DeviceManager:
         # endpoint and skipped entirely when all peripherals are already
         # disconnected.
         check_server_health(self._peripherals)
+
+        t_health = time.time()
 
         # Fast path: if every peripheral sharing a (host, port, password) endpoint
         # just went connected -> disconnected together in this same cycle, that's
@@ -1107,6 +1111,8 @@ class DeviceManager:
             if endpoint_just_dropped.get(key) and all(
                     not pstates[pid].get('connected', False) for pid in peripheral_ids):
                 _shared_server_reset(*key)
+
+        t_prepass = time.time()
 
         for peripheral_id, periph in list(self._peripherals.items()):
             pstate = pstates.get(peripheral_id) or periph.get_state()
@@ -1189,6 +1195,18 @@ class DeviceManager:
                     periph.heartbeat()
                 except Exception:
                     pass
+
+        t_end = time.time()
+        total_dt = t_end - now_mono
+        if total_dt > 1.0:
+            print(
+                f"[PollAll] SLOW: total={total_dt:.2f}s "
+                f"alicat={t_alicat - now_mono:.2f}s "
+                f"health={t_health - t_alicat:.2f}s "
+                f"periph_prepass={t_prepass - t_health:.2f}s "
+                f"periph_main={t_end - t_prepass:.2f}s",
+                flush=True,
+            )
 
         return readings
 
