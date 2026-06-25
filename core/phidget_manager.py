@@ -945,9 +945,57 @@ import socket as _socket
 
 _server_health_last: dict[tuple[str, int], float] = {}   # (host, port) -> last_check monotonic
 _server_health_fail_count: dict[tuple[str, int], int] = {}  # (host, port) -> consecutive probe failures
+_server_health_probing: set[tuple[str, int]] = set()  # endpoints with a probe currently in flight
 _SERVER_HEALTH_INTERVAL = 3.0  # seconds between probes for the same endpoint
 _SERVER_HEALTH_TIMEOUT = 2.0   # TCP connect timeout
 _SERVER_HEALTH_FAIL_THRESHOLD = 3  # consecutive failed probes before declaring the endpoint down
+
+
+def _run_health_probe(host: str, port: int, periphs: list, password: str):
+    """Blocking TCP connect probe + the resulting fail-count/reset logic.
+    Runs on a daemon thread (see check_server_health) so a probe against a
+    genuinely unreachable endpoint — which can legitimately take the full
+    _SERVER_HEALTH_TIMEOUT every time it's due — never blocks the gevent poll
+    loop that calls check_server_health()."""
+    key = (host, port)
+    reachable = False
+    try:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.settimeout(_SERVER_HEALTH_TIMEOUT)
+        sock.connect((host, port))
+        reachable = True
+    except Exception:
+        reachable = False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    try:
+        if not reachable:
+            # Require several consecutive failed probes before acting, so a
+            # single transient connect error (e.g. a momentary local socket
+            # abort) doesn't force-disconnect every peripheral on this
+            # endpoint.
+            fail_count = _server_health_fail_count.get(key, 0) + 1
+            _server_health_fail_count[key] = fail_count
+            if fail_count >= _SERVER_HEALTH_FAIL_THRESHOLD:
+                # Server unreachable — cycle the shared Net server registration
+                # once for this endpoint, then force-disconnect all peripherals
+                # on it so the poll loop reattaches each one's channels
+                # individually against the fresh connection.
+                _shared_server_reset(host, port, password)
+                for p in periphs:
+                    try:
+                        p._on_server_removed()
+                    except Exception:
+                        pass
+                _server_health_fail_count[key] = 0
+        else:
+            _server_health_fail_count[key] = 0
+    finally:
+        _server_health_probing.discard(key)
 
 
 def check_server_health(peripherals: dict):
@@ -958,6 +1006,12 @@ def check_server_health(peripherals: dict):
     every peripheral using that endpoint so the poll loop detects the
     disconnect.  Requiring consecutive failures avoids force-disconnecting a
     healthy group of peripherals over a single transient probe error.
+
+    The actual TCP connect (and the fail-count/reset logic that depends on its
+    result) runs on a background daemon thread — a probe against a genuinely
+    unreachable endpoint can legitimately take the full _SERVER_HEALTH_TIMEOUT
+    (2s) every time it's due, and this function itself must return immediately
+    since it's called synchronously from the gevent poll loop in device_manager.
 
     Parameters
     ----------
@@ -980,11 +1034,11 @@ def check_server_health(peripherals: dict):
         endpoints.setdefault(key, []).append(periph)
 
     for (host, port), periphs in endpoints.items():
+        key = (host, port)
         # Rate-limit probes — no more than once per _SERVER_HEALTH_INTERVAL
-        last = _server_health_last.get((host, port), 0)
+        last = _server_health_last.get(key, 0)
         if now - last < _SERVER_HEALTH_INTERVAL:
             continue
-        _server_health_last[(host, port)] = now
 
         # Only probe if at least one peripheral thinks it's connected.
         # If all are already disconnected, the poll loop is already handling
@@ -993,43 +1047,16 @@ def check_server_health(peripherals: dict):
         if not any_connected:
             continue
 
-        # Raw TCP connect probe
-        reachable = False
-        try:
-            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-            sock.settimeout(_SERVER_HEALTH_TIMEOUT)
-            sock.connect((host, port))
-            reachable = True
-        except Exception:
-            reachable = False
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
+        # Skip if the previous probe for this endpoint hasn't finished yet —
+        # avoids piling up overlapping probe threads if one is running long.
+        if key in _server_health_probing:
+            continue
 
-        if not reachable:
-            # Require several consecutive failed probes before acting, so a
-            # single transient connect error (e.g. a momentary local socket
-            # abort) doesn't force-disconnect every peripheral on this
-            # endpoint.
-            fail_count = _server_health_fail_count.get((host, port), 0) + 1
-            _server_health_fail_count[(host, port)] = fail_count
-            if fail_count >= _SERVER_HEALTH_FAIL_THRESHOLD:
-                # Server unreachable — cycle the shared Net server registration
-                # once for this endpoint, then force-disconnect all peripherals
-                # on it so the poll loop reattaches each one's channels
-                # individually against the fresh connection.
-                password = getattr(periphs[0], 'server_password', '') or ''
-                _shared_server_reset(host, port, password)
-                for p in periphs:
-                    try:
-                        p._on_server_removed()
-                    except Exception:
-                        pass
-                _server_health_fail_count[(host, port)] = 0
-        else:
-            _server_health_fail_count[(host, port)] = 0
+        _server_health_last[key] = now
+        _server_health_probing.add(key)
+        password = getattr(periphs[0], 'server_password', '') or ''
+        t = threading.Thread(target=_run_health_probe, args=(host, port, periphs, password), daemon=True)
+        t.start()
 
 
 PHIDGET_AVAILABLE_FLAG = PHIDGET_AVAILABLE
