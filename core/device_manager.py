@@ -1113,6 +1113,7 @@ class DeviceManager:
                 _shared_server_reset(*key)
 
         t_prepass = time.time()
+        _emit_dt_total = 0.0  # cumulative time spent in toast/server_log/peripheral_update emits this cycle
 
         for peripheral_id, periph in list(self._peripherals.items()):
             pstate = pstates.get(peripheral_id) or periph.get_state()
@@ -1130,12 +1131,14 @@ class DeviceManager:
             prev_connected = self._periph_was_opened.get(peripheral_id)
 
             if prev_connected is not None and curr_connected != prev_connected:
+                _t_emit0 = time.time()
                 self._debounced_toast(f'periph:{peripheral_id}', f'Peripheral {periph.name}', curr_connected)
                 if curr_connected:
                     self.socketio.emit('server_log', {'msg': f'[Peripheral] {periph.name} connected', 'level': 'info', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
                 else:
                     self.socketio.emit('server_log', {'msg': f'[Peripheral] {periph.name} connection lost', 'level': 'warning', 'ts': datetime.now(timezone.utc).strftime('%H:%M:%S')})
                 self.socketio.emit('peripheral_update', pstate)
+                _emit_dt_total += time.time() - _t_emit0
 
             self._periph_was_opened[peripheral_id] = curr_connected
 
@@ -1231,7 +1234,8 @@ class DeviceManager:
                 f"alicat={t_alicat - now_mono:.2f}s "
                 f"health={t_health - t_alicat:.2f}s "
                 f"periph_prepass={t_prepass - t_health:.2f}s "
-                f"periph_main={t_end - t_prepass:.2f}s",
+                f"periph_main={t_end - t_prepass:.2f}s "
+                f"(of which emit={_emit_dt_total:.2f}s)",
                 flush=True,
             )
 
