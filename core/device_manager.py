@@ -63,6 +63,7 @@ class DeviceManager:
         self._periph_loggers: dict = {}                      # peripheral_id -> DataLogger
 
         self._schedules: dict[str, dict] = {}               # device_id -> schedule state
+        self._relay_schedules: dict[str, dict] = {}         # "peripheral_name::channel" -> relay schedule state
         self._last_read_ok: dict[str, bool] = {}             # device_id -> did last poll return a reading?
         self._running: dict[str, bool] = {}                  # device_id -> bool (logging active)
         self._last_reconnect: dict[str, float] = {}          # device_id -> epoch of last attempt
@@ -678,6 +679,134 @@ class DeviceManager:
             return True
         return False
 
+    # ── Relay/Heater Schedule Execution ─────────────────────────────────────────
+    # Parallel to the Alicat schedule engine above (self._schedules /
+    # load_schedule / start_schedule / stop_schedule / _tick_schedule).  Kept as
+    # a separate dict and separate methods rather than merged into the Alicat
+    # path, so relay scheduling can be added without touching the working flow
+    # scheduler.  target_key is "<peripheral_name>::<channel>", matching the
+    # composite key used in the experiment's device_schedules.
+
+    def load_relay_schedule(self, target_key: str, peripheral_id: str, channel: int, schedule: list) -> dict:
+        """Load an on/off schedule for a relay channel without starting it."""
+        periph = self._peripherals.get(peripheral_id)
+        if periph is None:
+            return {'success': False, 'error': 'Peripheral not found'}
+        if not hasattr(periph, 'set_channel'):
+            return {'success': False, 'error': 'Not a relay device'}
+        if not schedule:
+            return {'success': False, 'error': 'Empty schedule'}
+
+        schedule = [{'time': s['time'], 'state': bool(s.get('state', False))} for s in schedule]
+
+        with self._lock:
+            self._relay_schedules[target_key] = {
+                'peripheral_id': peripheral_id,
+                'channel': int(channel),
+                'schedule': schedule,
+                'running': False,
+                'start_time': None,
+                'current_step': 0,
+                # None (not False) so the first tick after start always asserts the
+                # real hardware state, even if step 0's target happens to be off.
+                'current_state': None,
+            }
+        return {'success': True, 'steps': len(schedule)}
+
+    def start_relay_schedule(self, target_key: str) -> dict:
+        """Start executing the loaded relay schedule for a target."""
+        with self._lock:
+            sched = self._relay_schedules.get(target_key)
+            if not sched:
+                return {'success': False, 'error': 'No schedule loaded'}
+            if sched['running']:
+                return {'success': False, 'error': 'Schedule already running'}
+            sched['running'] = True
+            sched['start_time'] = time.time()
+            sched['current_step'] = 0
+        return {'success': True}
+
+    def stop_relay_schedule(self, target_key: str) -> dict:
+        """Stop the relay schedule (does not change the relay's current hardware state)."""
+        with self._lock:
+            sched = self._relay_schedules.get(target_key)
+            if sched:
+                sched['running'] = False
+        return {'success': True}
+
+    def relay_schedules_all_done(self, target_keys: list) -> bool:
+        """Return True when every relay target in target_keys has finished its schedule.
+        Returns False if target_keys is empty (nothing to check)."""
+        if not target_keys:
+            return False
+        for key in target_keys:
+            sched = self._relay_schedules.get(key)
+            if sched and sched.get('running'):
+                return False
+        return True
+
+    def _tick_relay_schedule(self, target_key: str, force_resend: bool = False) -> bool:
+        """
+        Advance a relay schedule for one target. Called from poll_all().
+        Only calls set_relay() when the target state actually changes (or on
+        force_resend), so a steady-state channel isn't re-commanded every poll
+        cycle. On a failed set_relay() call, current_state is NOT updated, so
+        the next tick retries — a stuck write must self-heal, not be silently
+        accepted as applied.
+        Returns True if a relay command was sent and succeeded.
+        """
+        sched = self._relay_schedules.get(target_key)
+        if not sched or not sched['running']:
+            return False
+
+        periph = self._peripherals.get(sched['peripheral_id'])
+        if not periph or not getattr(periph, 'connected', False):
+            return False
+
+        elapsed = time.time() - sched['start_time']
+        steps = sched['schedule']
+        last_time = steps[-1]['time']
+
+        if elapsed > last_time:
+            sched['running'] = False
+            # Schedule ending must not leave the state ambiguous — explicitly
+            # re-assert the final step's state one last time.
+            result = self.set_relay(sched['peripheral_id'], sched['channel'], steps[-1]['state'])
+            if result.get('success'):
+                sched['current_state'] = steps[-1]['state']
+            return False
+
+        target_state = sched['current_state']
+        for step in steps:
+            if elapsed >= step['time']:
+                target_state = step['state']
+            else:
+                break
+
+        if force_resend or target_state != sched['current_state']:
+            result = self.set_relay(sched['peripheral_id'], sched['channel'], target_state)
+            if result.get('success'):
+                sched['current_state'] = target_state
+                sched['current_step'] = next(
+                    (i for i, s in enumerate(steps) if s['state'] == target_state), 0
+                )
+            return result.get('success', False)
+        return False
+
+    def get_relay_schedule_state(self, target_key: str) -> dict | None:
+        """Return the schedule sub-object for a single relay target (for broadcasting)."""
+        sched = self._relay_schedules.get(target_key)
+        if not sched:
+            return None
+        return {
+            'loaded': True,
+            'running': sched.get('running', False),
+            'steps': len(sched.get('schedule', [])),
+            'current_step': sched.get('current_step', 0),
+            'current_state': sched.get('current_state'),
+            'start_time': sched.get('start_time'),
+        }
+
     # ── Peripheral Lifecycle ─────────────────────────────────────────────────
 
     def _create_peripheral_from_config(self, peripheral_id, cfg, open_=False):
@@ -1226,6 +1355,14 @@ class DeviceManager:
                 except Exception:
                     pass
 
+            # Advance any relay schedules targeting this peripheral. Snapshot
+            # via list() first since a schedule can be started/stopped from a
+            # different greenlet (Socket.IO handler) mid-iteration.
+            if curr_connected and hasattr(periph, 'set_channel'):
+                for target_key, rsched in list(self._relay_schedules.items()):
+                    if rsched.get('peripheral_id') == peripheral_id and rsched.get('running'):
+                        self._tick_relay_schedule(target_key)
+
         t_end = time.time()
         total_dt = t_end - now_mono
         if total_dt > 1.0:
@@ -1383,6 +1520,13 @@ class DeviceManager:
             return {}
         state = periph.get_state()
         state['disabled'] = self._periph_disabled.get(peripheral_id, False)
+        if hasattr(periph, 'set_channel'):
+            channel_schedules = {}
+            for target_key, sched in self._relay_schedules.items():
+                if sched.get('peripheral_id') == peripheral_id:
+                    channel_schedules[sched['channel']] = self.get_relay_schedule_state(target_key)
+            if channel_schedules:
+                state['channel_schedules'] = channel_schedules
         return state
 
     def get_all_peripheral_states(self) -> list:
@@ -1447,6 +1591,19 @@ class DeviceManager:
                     'schedule_current_step': sched.get('current_step', 0),
                     'schedule_data': sched.get('schedule'),
                 }
+        relay_running = {}
+        for target_key, sched in self._relay_schedules.items():
+            if sched.get('running'):
+                relay_running[target_key] = {
+                    'peripheral_id': sched['peripheral_id'],
+                    'channel': sched['channel'],
+                    'schedule_running': True,
+                    'schedule_start_time': sched.get('start_time'),
+                    'schedule_current_step': sched.get('current_step', 0),
+                    'schedule_data': sched.get('schedule'),
+                }
+        if relay_running:
+            running['_relay'] = relay_running
         return running
 
     def resume_experiment(self, saved_state: dict):
@@ -1458,6 +1615,8 @@ class DeviceManager:
             return
         now = time.time()
         for device_id, state in saved_state.items():
+            if device_id in ('_relay', '_experiment'):
+                continue
             device = self._alicat.get(device_id)
             if not device or not device.connected:
                 continue
@@ -1479,6 +1638,25 @@ class DeviceManager:
                     if sched:
                         sched['running'] = True
                         sched['start_time'] = original_start  # resume from crash point
+
+        # Resume relay schedules the same way, so a heater schedule doesn't
+        # silently fail to come back while a flow schedule on the same
+        # experiment does.
+        for target_key, state in (saved_state.get('_relay') or {}).items():
+            peripheral_id = state.get('peripheral_id')
+            periph = self._peripherals.get(peripheral_id)
+            if not periph or not getattr(periph, 'connected', False):
+                continue
+            if state.get('schedule_running') and state.get('schedule_data'):
+                self.load_relay_schedule(
+                    target_key, peripheral_id, state.get('channel', 0), state['schedule_data']
+                )
+                original_start = state.get('schedule_start_time', now)
+                with self._lock:
+                    rsched = self._relay_schedules.get(target_key, {})
+                    if rsched:
+                        rsched['running'] = True
+                        rsched['start_time'] = original_start
 
     def phidget_available(self):
         return PHIDGET_AVAILABLE_FLAG

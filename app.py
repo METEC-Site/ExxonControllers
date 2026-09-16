@@ -1354,10 +1354,18 @@ def export_multi_device_csv(experiment_id):
 @app.route('/api/experiments/<experiment_id>/import_device_schedule', methods=['POST'])
 @login_required
 def import_device_schedule(experiment_id):
-    """Parse an uploaded CSV and assign it to a device in the experiment."""
+    """
+    Parse an uploaded CSV and assign it to a target in the experiment.
+    device_name           -> flow schedule (existing behaviour)
+    peripheral_name+channel -> relay/heater on-off schedule
+    If neither is supplied, the target type is inferred from the parsed CSV's
+    columns and device_name is required for a flow-shaped CSV.
+    """
     device_name = request.form.get('device_name', '').strip()
-    if not device_name:
-        return jsonify({'error': 'device_name is required'}), 400
+    peripheral_name = request.form.get('peripheral_name', '').strip()
+    channel_raw = request.form.get('channel', '').strip()
+    if not device_name and not peripheral_name:
+        return jsonify({'error': 'device_name or peripheral_name is required'}), 400
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
     try:
@@ -1369,7 +1377,17 @@ def import_device_schedule(experiment_id):
     if not parsed['success']:
         return jsonify({'error': parsed['error'], 'row_errors': parsed.get('row_errors', [])}), 400
 
-    result = experiment_mgr.assign_device_schedule(experiment_id, device_name, parsed['schedule'])
+    if parsed.get('target_type') == 'relay' or peripheral_name:
+        if not peripheral_name:
+            return jsonify({'error': 'CSV contains a relay on/off schedule but no peripheral_name was given'}), 400
+        try:
+            channel = int(channel_raw)
+        except ValueError:
+            return jsonify({'error': 'channel is required and must be an integer for a relay schedule'}), 400
+        result = experiment_mgr.assign_relay_schedule(experiment_id, peripheral_name, channel, parsed['schedule'])
+    else:
+        result = experiment_mgr.assign_device_schedule(experiment_id, device_name, parsed['schedule'])
+
     if result['success']:
         socketio.emit('experiment_updated', experiment_mgr.get_experiment(experiment_id))
     return jsonify({**result, 'count': parsed['count'], 'duration_human': parsed.get('duration_human', ''),
@@ -1379,7 +1397,13 @@ def import_device_schedule(experiment_id):
 @app.route('/api/experiments/<experiment_id>/import_multi_device_schedule', methods=['POST'])
 @login_required
 def import_multi_device_schedule(experiment_id):
-    """Parse a multi-device CSV (Emission ID, Time (UTC), Flow (SLPM)) and assign schedules."""
+    """
+    Parse a multi-device CSV (Emission ID, Time (UTC), Flow (SLPM)) and assign
+    schedules. Emission ID rows may target a flow controller (by device_name)
+    or, using the "PeripheralName::channel" composite key convention, a relay/
+    heater channel — disambiguated per-target by parse_multi_device_csv based
+    on whether that target's values parsed as numbers or on/off tokens.
+    """
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
     try:
@@ -1391,9 +1415,18 @@ def import_multi_device_schedule(experiment_id):
     if not parsed['success']:
         return jsonify({'error': parsed['error'], 'row_errors': parsed.get('row_errors', [])}), 400
 
+    target_types = parsed.get('target_types', {})
     assigned = []
     for device_name, schedule in parsed['schedules'].items():
-        result = experiment_mgr.assign_device_schedule(experiment_id, device_name, schedule)
+        if target_types.get(device_name) == 'relay' and '::' in device_name:
+            peripheral_name, _, channel_str = device_name.rpartition('::')
+            try:
+                channel = int(channel_str)
+            except ValueError:
+                continue
+            result = experiment_mgr.assign_relay_schedule(experiment_id, peripheral_name, channel, schedule)
+        else:
+            result = experiment_mgr.assign_device_schedule(experiment_id, device_name, schedule)
         if result['success']:
             assigned.append({'device_name': device_name, 'steps': len(schedule)})
 
@@ -2012,7 +2045,8 @@ def _polling_loop():
 
 
 def _broadcast_schedule_progress():
-    """Emit per-device schedule progress for all devices with active schedules."""
+    """Emit per-target schedule progress for all flow devices and relay
+    channels with active schedules."""
     now = time.time()
     progress_updates = []
     for device_id in device_mgr._alicat:
@@ -2022,12 +2056,30 @@ def _broadcast_schedule_progress():
             steps = sched.get('schedule', [])
             total = steps[-1]['time'] if steps else 1
             progress_updates.append({
+                'target_type': 'flow',
+                'target_key': device_id,
                 'device_id': device_id,
                 'elapsed': elapsed,
                 'total': total,
                 'pct': min(100, (elapsed / total * 100)) if total else 0,
                 'current_step': sched.get('current_step', 0),
                 'current_setpoint': sched.get('current_setpoint', 0.0),
+            })
+    for target_key, rsched in list(device_mgr._relay_schedules.items()):
+        if rsched and rsched.get('running'):
+            elapsed = now - (rsched.get('start_time') or now)
+            steps = rsched.get('schedule', [])
+            total = steps[-1]['time'] if steps else 1
+            progress_updates.append({
+                'target_type': 'relay',
+                'target_key': target_key,
+                'peripheral_id': rsched['peripheral_id'],
+                'channel': rsched['channel'],
+                'elapsed': elapsed,
+                'total': total,
+                'pct': min(100, (elapsed / total * 100)) if total else 0,
+                'current_step': rsched.get('current_step', 0),
+                'current_state': rsched.get('current_state'),
             })
     if progress_updates:
         socketio.emit('schedule_progress', progress_updates)

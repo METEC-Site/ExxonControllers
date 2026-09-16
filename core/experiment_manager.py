@@ -18,8 +18,15 @@ Experiment JSON schema (stored in config/experiments/<id>.json):
   "status": "draft",           # draft | running | completed | crashed
   "device_schedules": {
     "MFC-1": {
+      "target_type": "flow",       # optional; absent/missing = "flow" (back-compat)
       "device_name": "MFC-1",
       "schedule": [{"time": 0, "setpoint": 5.0}, ...]
+    },
+    "Heaters::0": {
+      "target_type": "relay",
+      "peripheral_name": "Heaters",
+      "channel": 0,
+      "schedule": [{"time": 0, "state": false}, {"time": 300, "state": true}, ...]
     }
   },
   "relay_checklist": [
@@ -160,11 +167,37 @@ class ExperimentManager:
             return {'success': False, 'error': 'Schedule is empty'}
 
         exp['device_schedules'][device_name] = {
+            'target_type': 'flow',
             'device_name': device_name,
             'schedule': schedule,
         }
         self._save_experiment(exp)
         return {'success': True, 'steps': len(schedule)}
+
+    def assign_relay_schedule(self, experiment_id: str, peripheral_name: str, channel: int,
+                               schedule: list) -> dict:
+        """
+        Assign an on/off schedule to a relay channel (matched by peripheral name +
+        channel index) within an experiment.
+        schedule: list of {time: float, state: bool}
+        """
+        exp = self.get_experiment(experiment_id)
+        if not exp:
+            return {'success': False, 'error': 'Experiment not found'}
+        if exp['status'] == 'running':
+            return {'success': False, 'error': 'Cannot modify a running experiment'}
+        if not schedule:
+            return {'success': False, 'error': 'Schedule is empty'}
+
+        target_key = f"{peripheral_name}::{channel}"
+        exp['device_schedules'][target_key] = {
+            'target_type': 'relay',
+            'peripheral_name': peripheral_name,
+            'channel': int(channel),
+            'schedule': schedule,
+        }
+        self._save_experiment(exp)
+        return {'success': True, 'steps': len(schedule), 'target_key': target_key}
 
     def remove_device_schedule(self, experiment_id: str, device_name: str) -> dict:
         exp = self.get_experiment(experiment_id)
@@ -195,14 +228,43 @@ class ExperimentManager:
         # Device connectivity checks
         device_checks = []
         for device_name, sched_info in exp.get('device_schedules', {}).items():
+            target_type = sched_info.get('target_type', 'flow')
+            steps = len(sched_info.get('schedule', []))
+
+            if target_type == 'relay':
+                peripheral_name = sched_info.get('peripheral_name', '')
+                channel = sched_info.get('channel', 0)
+                peripheral_id = self._find_peripheral_id_by_name(device_mgr, peripheral_name)
+                periph = device_mgr._peripherals.get(peripheral_id) if peripheral_id else None
+                found = periph is not None
+                connected = getattr(periph, 'connected', False) if periph else False
+
+                device_checks.append({
+                    'device_name': device_name,
+                    'target_type': 'relay',
+                    'found': found,
+                    'connected': connected,
+                    'steps': steps,
+                    'device_id': peripheral_id,
+                })
+                if not found:
+                    warnings.append(f"Peripheral '{peripheral_name}' is in the experiment but not found in the system.")
+                elif not connected:
+                    warnings.append(f"Peripheral '{peripheral_name}' is not connected.")
+                elif not hasattr(periph, 'set_channel'):
+                    warnings.append(f"Peripheral '{peripheral_name}' is not a relay device.")
+                elif channel < 0 or channel >= len(getattr(periph, 'channel_labels', None) or [None] * 4):
+                    warnings.append(f"Peripheral '{peripheral_name}': channel {channel} is out of range.")
+                continue
+
             device_id = self._find_device_id_by_name(device_mgr, device_name)
             device = device_mgr._alicat.get(device_id) if device_id else None
             found = device is not None
             connected = device.connected if device else False
-            steps = len(sched_info.get('schedule', []))
 
             device_checks.append({
                 'device_name': device_name,
+                'target_type': 'flow',
                 'found': found,
                 'connected': connected,
                 'steps': steps,
@@ -238,6 +300,8 @@ class ExperimentManager:
         # Flow range checks: warn if any schedule step exceeds the device's max_flow
         flow_warnings = []
         for device_name, sched_info in exp.get('device_schedules', {}).items():
+            if sched_info.get('target_type', 'flow') != 'flow':
+                continue
             device_id = self._find_device_id_by_name(device_mgr, device_name)
             device = device_mgr._alicat.get(device_id) if device_id else None
             if device is None:
@@ -371,6 +435,8 @@ class ExperimentManager:
                 pass  # malformed iso — ignore, start immediately
 
         for device_name, sched_info in exp['device_schedules'].items():
+            if sched_info.get('target_type', 'flow') != 'flow':
+                continue
             device_id = self._find_device_id_by_name(device_mgr, device_name)
             if not device_id:
                 continue
@@ -402,7 +468,31 @@ class ExperimentManager:
 
             started_device_ids.append(device_id)
 
-        if not started_device_ids:
+        # Relay/heater schedules, started alongside the flow schedules above so
+        # both target types share the same T=0.
+        started_relay_keys = []
+        for target_key, sched_info in exp['device_schedules'].items():
+            if sched_info.get('target_type') != 'relay':
+                continue
+            peripheral_name = sched_info.get('peripheral_name', '')
+            peripheral_id = self._find_peripheral_id_by_name(device_mgr, peripheral_name)
+            if not peripheral_id:
+                continue
+            periph = device_mgr._peripherals.get(peripheral_id)
+            if not periph or not getattr(periph, 'connected', False):
+                continue
+
+            channel = sched_info.get('channel', 0)
+            schedule = sched_info.get('schedule', [])
+            if not schedule:
+                continue
+            if delay_s > 0:
+                schedule = [{**s, 'time': s['time'] + delay_s} for s in schedule]
+            device_mgr.load_relay_schedule(target_key, peripheral_id, channel, schedule)
+            device_mgr.start_relay_schedule(target_key)
+            started_relay_keys.append(target_key)
+
+        if not started_device_ids and not started_relay_keys:
             return {'success': False, 'error': 'No devices could be started (check connectivity)'}
 
         # Create shared experiment logger and attach to device_manager
@@ -427,6 +517,7 @@ class ExperimentManager:
                 'data_dir': exp_data_dir,
                 'start_time': time.time(),
                 'started_device_ids': started_device_ids,
+                'started_relay_keys': started_relay_keys,
             }
 
         # Prevent auto-stop-logging from firing for these devices while the
@@ -437,6 +528,7 @@ class ExperimentManager:
             'success': True,
             'data_dir': exp_data_dir,
             'started_devices': len(started_device_ids),
+            'started_relays': len(started_relay_keys),
         }
 
     def stop_experiment(self, device_mgr) -> dict:
@@ -451,6 +543,16 @@ class ExperimentManager:
             device_mgr.set_setpoint(device_id, 0)
             device_mgr.stop_schedule(device_id)
             device_mgr.stop_device(device_id)
+
+        # Safety net: force every started relay/heater channel off, mirroring
+        # the flow-zeroing above. stop_relay_schedule alone only halts further
+        # schedule-driven writes — it does not command the hardware — so this
+        # explicit set_relay() is what actually de-energises the channel.
+        for target_key in current.get('started_relay_keys', []):
+            rsched = device_mgr._relay_schedules.get(target_key)
+            device_mgr.stop_relay_schedule(target_key)
+            if rsched:
+                device_mgr.set_relay(rsched['peripheral_id'], rsched['channel'], False)
 
         device_mgr.clear_experiment_logger()
 
@@ -484,7 +586,8 @@ class ExperimentManager:
                 'elapsed_seconds': elapsed,
                 'elapsed_human': _format_duration(elapsed),
                 'data_dir': os.path.basename(self._current['data_dir']),
-                'device_count': len(self._current['started_device_ids']),
+                'device_count': (len(self._current['started_device_ids'])
+                                 + len(self._current.get('started_relay_keys', []))),
             }
 
     def get_started_device_ids(self) -> list | None:
@@ -542,6 +645,12 @@ class ExperimentManager:
         sched_info = exp.get('device_schedules', {}).get(device_name)
         if not sched_info:
             return None
+        if sched_info.get('target_type') == 'relay':
+            lines = ['time,state']
+            for step in sched_info.get('schedule', []):
+                lines.append(f"{step['time']},{'ON' if step['state'] else 'OFF'}")
+            return '\n'.join(lines)
+
         lines = ['time,rate(SLPM)']
         for step in sched_info.get('schedule', []):
             lines.append(f"{step['time']},{step['setpoint']}")
@@ -568,9 +677,11 @@ class ExperimentManager:
 
         rows = []
         for device_name, sched_info in exp.get('device_schedules', {}).items():
+            is_relay = sched_info.get('target_type') == 'relay'
             for step in sched_info.get('schedule', []):
                 abs_time = global_start + timedelta(seconds=step['time'])
-                rows.append((abs_time, device_name, step['setpoint']))
+                value = ('ON' if step['state'] else 'OFF') if is_relay else step['setpoint']
+                rows.append((abs_time, device_name, value))
         rows.sort(key=lambda r: r[0])
 
         lines = ['Emission ID,Time (UTC),Flow (SLPM)']
@@ -608,6 +719,9 @@ class ExperimentManager:
         Parse a device schedule CSV (same formats as CLI version):
         - Relative seconds: columns "time", "rate(LPM)" or similar
         - ISO8601: first time cell contains 'T' or '-'
+        - Relay/heater on-off: columns "time", "state" (or "on_off"/"relay") instead
+          of a flow-rate column -- returns target_type='relay' and steps shaped
+          {'time': ..., 'state': bool} instead of {'time': ..., 'setpoint': float}.
         Returns {'success': bool, 'schedule': [...], 'count': int, 'error': str}
         Row-level errors are collected and returned as 'row_errors' list.
         """
@@ -621,10 +735,24 @@ class ExperimentManager:
                  if any(word in k for word in ['rate', 'lpm', 'slpm', 'setpoint', 'flow'])),
                 None
             )
+            state_key = next(
+                (v for k, v in fieldnames_lower.items()
+                 if any(word in k for word in ['state', 'on_off', 'on/off', 'relay'])),
+                None
+            )
             if not time_key:
                 return {'success': False, 'error': 'CSV must have a "time" column'}
-            if not rate_key:
-                return {'success': False, 'error': 'CSV must have a flow rate column (rate, lpm, slpm, setpoint, or flow)'}
+            if rate_key and state_key:
+                return {'success': False,
+                        'error': 'CSV has both a flow-rate column and a state column — '
+                                 'use one or the other, not both'}
+            if not rate_key and not state_key:
+                return {'success': False,
+                        'error': 'CSV must have either a flow rate column (rate, lpm, slpm, '
+                                 'setpoint, flow) or a relay state column (state, on_off, relay)'}
+
+            is_relay = state_key is not None
+            value_key = state_key if is_relay else rate_key
 
             rows = list(reader)
             if not rows:
@@ -634,26 +762,27 @@ class ExperimentManager:
             is_iso = 'T' in first_time or (first_time.count('-') >= 2)
 
             # For ISO mode: two-pass so out-of-order rows don't corrupt ref_time.
-            # First pass: parse all (datetime, rate) pairs.
+            # First pass: parse all (datetime, value) pairs.
             raw_entries = []
             row_errors = []
             for row_num, row in enumerate(rows, start=2):  # start=2: row 1 is header
                 t_raw = row.get(time_key, '').strip()
-                r_raw = row.get(rate_key, '').strip()
+                v_raw = row.get(value_key, '').strip()
                 try:
-                    rate = float(r_raw)
+                    value = _parse_bool_token(v_raw) if is_relay else float(v_raw)
                 except ValueError:
+                    kind = 'relay state' if is_relay else 'flow rate'
                     row_errors.append({'row': row_num, 'content': str(dict(row)),
-                                       'message': f'Invalid flow rate: {r_raw!r}'})
+                                       'message': f'Invalid {kind}: {v_raw!r}'})
                     continue
                 try:
                     if is_iso:
                         dt = date_parser.parse(t_raw)
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
-                        raw_entries.append((dt, rate))
+                        raw_entries.append((dt, value))
                     else:
-                        raw_entries.append((float(t_raw), rate))
+                        raw_entries.append((float(t_raw), value))
                 except Exception as e:
                     row_errors.append({'row': row_num, 'content': str(dict(row)),
                                        'message': f'Invalid time {t_raw!r}: {e}'})
@@ -666,18 +795,20 @@ class ExperimentManager:
 
             # Second pass: sort by time, then compute relative seconds for ISO.
             raw_entries.sort(key=lambda x: x[0])
+            value_field = 'state' if is_relay else 'setpoint'
             if is_iso:
                 ref_time = raw_entries[0][0]
-                schedule = [{'time': (dt - ref_time).total_seconds(), 'setpoint': rate}
-                            for dt, rate in raw_entries]
+                schedule = [{'time': (dt - ref_time).total_seconds(), value_field: value}
+                            for dt, value in raw_entries]
             else:
-                schedule = [{'time': t, 'setpoint': rate} for t, rate in raw_entries]
+                schedule = [{'time': t, value_field: value} for t, value in raw_entries]
 
             schedule.sort(key=lambda x: x['time'])
             duration = schedule[-1]['time'] if schedule else 0
             result = {
                 'success': True,
                 'schedule': schedule,
+                'target_type': 'relay' if is_relay else 'flow',
                 'count': len(schedule),
                 'duration_seconds': duration,
                 'duration_human': _format_duration(duration),
@@ -693,8 +824,14 @@ class ExperimentManager:
         """
         Parse a multi-device experiment CSV with columns:
           Emission ID, Time (UTC), Flow (SLPM)
+        The value column accepts either a numeric flow rate or an ON/OFF-style
+        token (see _parse_bool_token) -- disambiguated per row, so a single file
+        can mix flow-controller rows and relay/heater rows (identified by the
+        target name in Emission ID, e.g. "Heaters::0"). A single Emission ID's
+        rows must be consistently one type or the other.
         Groups rows by Emission ID and returns a schedule per device.
-        Returns {'success': bool, 'schedules': {emission_id: [...]}, 'row_errors': [...]}
+        Returns {'success': bool, 'schedules': {emission_id: [...]},
+                 'target_types': {emission_id: 'flow'|'relay'}, 'row_errors': [...]}
         """
         try:
             # Strip BOM if present
@@ -723,22 +860,36 @@ class ExperimentManager:
             if not rows:
                 return {'success': False, 'error': 'CSV has no data rows'}
 
-            # Collect (emission_id, datetime, flow) triples
+            # Collect (emission_id, datetime, value) triples. Each row's value is
+            # disambiguated independently: a plain number is a flow rate, an
+            # ON/OFF-style token is a relay state.
             groups: dict[str, list] = {}
+            group_type: dict[str, str] = {}  # eid -> 'flow' | 'relay'
             row_errors = []
             for row_num, row in enumerate(rows, start=2):
                 eid   = row.get(id_key, '').strip()
                 t_raw = row.get(time_key, '').strip()
-                f_raw = row.get(flow_key, '').strip()
+                v_raw = row.get(flow_key, '').strip()
                 if not eid:
                     row_errors.append({'row': row_num, 'content': str(dict(row)),
                                        'message': 'Missing Emission ID'})
                     continue
                 try:
-                    flow = float(f_raw)
+                    value = float(v_raw)
+                    value_type = 'flow'
                 except ValueError:
+                    try:
+                        value = _parse_bool_token(v_raw)
+                        value_type = 'relay'
+                    except ValueError:
+                        row_errors.append({'row': row_num, 'content': str(dict(row)),
+                                           'message': f'Invalid flow rate or relay state: {v_raw!r}'})
+                        continue
+                existing_type = group_type.get(eid)
+                if existing_type and existing_type != value_type:
                     row_errors.append({'row': row_num, 'content': str(dict(row)),
-                                       'message': f'Invalid flow: {f_raw!r}'})
+                                       'message': f"'{eid}' mixes flow values and relay "
+                                                  f"states in the same schedule — not allowed"})
                     continue
                 try:
                     dt = date_parser.parse(t_raw)
@@ -748,7 +899,8 @@ class ExperimentManager:
                     row_errors.append({'row': row_num, 'content': str(dict(row)),
                                        'message': f'Invalid time {t_raw!r}: {e}'})
                     continue
-                groups.setdefault(eid, []).append((dt, flow))
+                group_type[eid] = value_type
+                groups.setdefault(eid, []).append((dt, value))
 
             if not groups:
                 return {'success': False, 'error': 'No valid rows parsed', 'row_errors': row_errors}
@@ -768,16 +920,21 @@ class ExperimentManager:
             global_earliest = min(all_times)
 
             schedules = {}
+            target_types = {}
             for eid, entries in groups.items():
                 entries.sort(key=lambda x: x[0])
+                vtype = group_type[eid]
+                value_field = 'state' if vtype == 'relay' else 'setpoint'
                 schedules[eid] = [
-                    {'time': (dt - global_earliest).total_seconds(), 'setpoint': flow}
-                    for dt, flow in entries
+                    {'time': (dt - global_earliest).total_seconds(), value_field: value}
+                    for dt, value in entries
                 ]
+                target_types[eid] = vtype
 
             return {
                 'success': True,
                 'schedules': schedules,
+                'target_types': target_types,
                 'device_count': len(schedules),
                 'global_start_iso': global_earliest.isoformat(),
             }
@@ -908,8 +1065,31 @@ class ExperimentManager:
                 return device_id
         return None
 
+    def _find_peripheral_id_by_name(self, device_mgr, peripheral_name: str) -> str | None:
+        for peripheral_id, periph in device_mgr._peripherals.items():
+            if periph.name == peripheral_name:
+                return peripheral_id
+        return None
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+_TRUE_TOKENS = {'1', 'true', 'on', 'yes'}
+_FALSE_TOKENS = {'0', 'false', 'off', 'no'}
+
+
+def _parse_bool_token(raw: str) -> bool:
+    """Tolerant boolean parser for relay-schedule CSV cells. Raises ValueError
+    (not a silent guess) for anything not in the recognised token sets, so a
+    malformed cell surfaces as a row error instead of being coerced into a
+    flow-rate-shaped 0/1."""
+    token = raw.strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    raise ValueError(f'not a recognised on/off value: {raw!r}')
+
 
 def _format_duration(seconds: float) -> str:
     if seconds < 0:

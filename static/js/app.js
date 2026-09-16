@@ -64,6 +64,7 @@ const app = (() => {
   let _devices = {};         // deviceId -> device state dict
   window._getAppDevices = () => _devices;  // expose for expUI (getter always returns current ref)
   let _peripherals = {};     // peripheralId -> peripheral state dict
+  window._getAppPeripherals = () => _peripherals;  // expose for expUI (relay/heater schedule targets)
   let _emissionPoints = [];  // ordered list of EP state dicts (TEST EP always first)
   window._getEmissionPoints = () => _emissionPoints;
   let _parsedSchedule = {};  // deviceId -> [{time, rate}] (pending load)
@@ -335,7 +336,10 @@ const app = (() => {
 
   // ── Schedule Progress ─────────────────────────────────────────────────────
   socket.on('schedule_progress', (updates) => {
-    updates.forEach(u => _updateScheduleProgress(u));
+    updates.forEach(u => {
+      if (u.target_type === 'relay') _updateRelayScheduleProgress(u);
+      else _updateScheduleProgress(u);
+    });
   });
 
   // ── Crash Recovery ────────────────────────────────────────────────────────
@@ -648,6 +652,18 @@ const app = (() => {
     if (remain) remain.textContent = `${_fmtDuration(update.total - update.elapsed)} rem`;
   }
 
+  function _updateRelayScheduleProgress(update) {
+    const idSuffix = `relay-${update.peripheral_id}-${update.channel}`;
+    const bar = document.getElementById(`sched-bar-${idSuffix}`);
+    const elapsed = document.getElementById(`sched-elapsed-${idSuffix}`);
+    const pctEl = document.getElementById(`sched-pct-${idSuffix}`);
+    const remain = document.getElementById(`sched-remain-${idSuffix}`);
+    if (bar) bar.style.width = update.pct.toFixed(1) + '%';
+    if (elapsed) elapsed.textContent = `${_fmtDuration(update.elapsed)}`;
+    if (pctEl) pctEl.textContent = `${update.pct.toFixed(1)}%`;
+    if (remain) remain.textContent = `${_fmtDuration(update.total - update.elapsed)} rem`;
+  }
+
   // ── Peripheral Rendering ──────────────────────────────────────────────────
 
   function _renderAllPeripherals() {
@@ -733,20 +749,47 @@ const app = (() => {
     if (noMsg) noMsg.style.display = 'none';
   }
 
+  function _relayScheduleHtml(peripheralId, channel, sched) {
+    if (!sched || !sched.loaded) return '';
+    const running = sched.running;
+    const idSuffix = `relay-${peripheralId}-${channel}`;
+    return `
+      <div class="mt-1" style="font-size:0.68rem">
+        <span class="text-muted">
+          <i class="fa fa-calendar-days me-1 text-purple"></i>
+          Sched: ${sched.steps} steps
+          ${running ? `— ${sched.current_state ? 'ON' : 'OFF'}` : ''}
+        </span>
+        <div class="schedule-bar-outer">
+          <div class="schedule-bar-fill" id="sched-bar-${idSuffix}" style="width:0%"></div>
+        </div>
+        <div class="schedule-info">
+          <span id="sched-elapsed-${idSuffix}">—</span>
+          <span id="sched-pct-${idSuffix}">—</span>
+          <span id="sched-remain-${idSuffix}">—</span>
+        </div>
+      </div>`;
+  }
+
   function _peripheralChannelsHtml(p) {
     const labels = p.channel_labels || [];
     const values = p.values || [];
     const units = p.units || '';
 
     if (p.type === 'relay' || p.type === 'relay_mechanical') {
+      const channelSchedules = p.channel_schedules || {};
       return `<div class="channel-grid">${labels.map((lbl, i) => {
         const on = values[i] === true;
+        const sched = channelSchedules[i];
+        const schedRunning = !!(sched && sched.running);
         return `<div class="channel-cell">
           <div class="ch-label">${_esc(lbl)}</div>
           <button class="relay-btn ${on ? 'on' : ''}" id="relay-btn-${p.peripheral_id}-${i}"
+            ${schedRunning ? 'disabled title="Controlled by an active schedule — stop the experiment to override"' : ''}
             onclick="app.toggleRelay('${p.peripheral_id}', ${i}, ${!on})">
             ${on ? 'ON' : 'OFF'}
           </button>
+          ${_relayScheduleHtml(p.peripheral_id, i, sched)}
         </div>`;
       }).join('')}</div>`;
     }
@@ -2688,7 +2731,11 @@ const expUI = (() => {
 
   let _experiments = [];          // list from server
   let _currentExperiment = null;  // running experiment info
-  let _editorSchedules = {};      // device_name -> [{time,setpoint}]
+  let _editorSchedules = {};      // key -> [{time,setpoint}] (flow) or [{time,state}] (relay)
+  // key -> {target_type:'relay', peripheral_name, channel} for relay rows only;
+  // a flow row has no entry here (absent = flow, matching the backend's
+  // target_type-optional convention).
+  let _editorTargetMeta = {};
   let _editorGlobalStartIso = null; // global_start_iso for current editor session
   let _preRunExpId = '';
 
@@ -2881,14 +2928,22 @@ const expUI = (() => {
     document.getElementById('expNotes').value = exp.notes || '';
 
     _editorSchedules = {};
+    _editorTargetMeta = {};
     _editorGlobalStartIso = exp.global_start_iso || null;
 
     // Render device schedule rows
     const container = document.getElementById('expDeviceSchedules');
     container.innerHTML = '';
-    for (const [deviceName, schedInfo] of Object.entries(exp.device_schedules || {})) {
-      _editorSchedules[deviceName] = schedInfo.schedule || [];
-      _addDeviceScheduleRowElement(deviceName, schedInfo.schedule || []);
+    for (const [key, schedInfo] of Object.entries(exp.device_schedules || {})) {
+      _editorSchedules[key] = schedInfo.schedule || [];
+      if (schedInfo.target_type === 'relay') {
+        _editorTargetMeta[key] = {
+          target_type: 'relay',
+          peripheral_name: schedInfo.peripheral_name,
+          channel: schedInfo.channel,
+        };
+      }
+      _addDeviceScheduleRowElement(key, schedInfo.schedule || []);
     }
     document.getElementById('noExpDevices').style.display =
       Object.keys(_editorSchedules).length === 0 ? 'block' : 'none';
@@ -2900,6 +2955,7 @@ const expUI = (() => {
       if (el) el.value = '';
     });
     _editorSchedules = {};
+    _editorTargetMeta = {};
     _editorGlobalStartIso = null;
     const container = document.getElementById('expDeviceSchedules');
     if (container) container.innerHTML = '';
@@ -2912,7 +2968,9 @@ const expUI = (() => {
   // ── Device Schedule Rows ──────────────────────────────────────────────────
 
   function addDeviceScheduleRow() {
-    // Populate datalist with current device names
+    // Populate datalist with current flow-controller device names and
+    // relay/heater channels (encoded as "PeripheralName::channel", the same
+    // composite key the backend uses).
     const datalist = document.getElementById('deviceNameDatalist');
     if (datalist) {
       datalist.innerHTML = '';
@@ -2922,12 +2980,37 @@ const expUI = (() => {
         opt.value = d.device_name || d.device_id;
         datalist.appendChild(opt);
       });
+      const peripherals = window._getAppPeripherals ? window._getAppPeripherals() : {};
+      Object.values(peripherals).forEach(p => {
+        if (p.type !== 'relay' && p.type !== 'relay_mechanical') return;
+        (p.channel_labels || []).forEach((label, i) => {
+          const opt = document.createElement('option');
+          opt.value = `${p.name}::${i}`;
+          opt.label = `${p.name} — ${label} (relay)`;
+          datalist.appendChild(opt);
+        });
+      });
     }
     // Show inline picker
     const picker = document.getElementById('addDevicePicker');
     const input = document.getElementById('addDeviceInput');
     if (picker) picker.classList.remove('d-none');
     if (input) { input.value = ''; input.focus(); }
+  }
+
+  /** If `name` matches "<connected relay peripheral name>::<channel>", return
+   * its relay target metadata; otherwise null (plain flow device name). */
+  function _resolveRelayTarget(name) {
+    const idx = name.lastIndexOf('::');
+    if (idx < 0) return null;
+    const peripheralName = name.slice(0, idx);
+    const channel = parseInt(name.slice(idx + 2), 10);
+    if (isNaN(channel)) return null;
+    const peripherals = window._getAppPeripherals ? window._getAppPeripherals() : {};
+    const match = Object.values(peripherals).find(p => p.name === peripheralName &&
+      (p.type === 'relay' || p.type === 'relay_mechanical'));
+    if (!match) return null;
+    return { target_type: 'relay', peripheral_name: peripheralName, channel };
   }
 
   function confirmAddDevice() {
@@ -2937,6 +3020,12 @@ const expUI = (() => {
     if (_editorSchedules[name] !== undefined) {
       _showAppToast(`Device "${name}" already has a schedule row`, 'warning');
       return;
+    }
+    const relayTarget = _resolveRelayTarget(name);
+    if (relayTarget) {
+      _editorTargetMeta[name] = relayTarget;
+    } else {
+      delete _editorTargetMeta[name];
     }
     _editorSchedules[name] = [];
     _addDeviceScheduleRowElement(name, []);
@@ -2949,16 +3038,32 @@ const expUI = (() => {
     if (picker) picker.classList.add('d-none');
   }
 
+  /** Human-friendly row label. Relay rows show "Peripheral — Channel Label";
+   * flow rows just show the device name. Display-only, never affects the
+   * saved key or payload. */
+  function _scheduleRowLabel(key) {
+    const meta = _editorTargetMeta[key];
+    if (!meta) return key;
+    const peripherals = window._getAppPeripherals ? window._getAppPeripherals() : {};
+    const p = Object.values(peripherals).find(pp => pp.name === meta.peripheral_name);
+    const chLabel = p && (p.channel_labels || [])[meta.channel];
+    return `${meta.peripheral_name} — ${chLabel || 'CH' + meta.channel}`;
+  }
+
   function _addDeviceScheduleRowElement(deviceName, schedule) {
     const container = document.getElementById('expDeviceSchedules');
     const row = document.createElement('div');
     row.className = 'exp-device-row';
     row.id = `expDevRow-${_safeId(deviceName)}`;
 
+    const isRelay = !!_editorTargetMeta[deviceName];
     const editHtml = _buildScheduleEditHtml(deviceName, schedule);
+    const label = _scheduleRowLabel(deviceName);
     row.innerHTML = `
       <div class="d-flex align-items-center justify-content-between mb-2">
-        <span class="fw-semibold text-info">${_escHtml(deviceName)}</span>
+        <span class="fw-semibold ${isRelay ? 'text-warning' : 'text-info'}">
+          ${isRelay ? '<i class="fa fa-bolt me-1" title="Relay/heater schedule"></i>' : ''}${_escHtml(label)}
+        </span>
         <div class="d-flex gap-1 align-items-center">
           <span class="text-muted small" id="expDevSteps-${_safeId(deviceName)}">${schedule.length} steps</span>
           <button class="btn btn-xs btn-outline-secondary" onclick="expUI.importDeviceCSV('${_escHtml(deviceName)}')" title="Import CSV">
@@ -2996,6 +3101,7 @@ const expUI = (() => {
   function _buildScheduleEditHtml(deviceName, schedule) {
     const esc = _escHtml(deviceName);
     const safeId = _safeId(deviceName);
+    const isRelay = !!_editorTargetMeta[deviceName];
     if (!schedule || schedule.length === 0) {
       return `<div class="text-muted small text-center py-2">No steps yet.
         <button class="btn btn-xs btn-outline-info ms-2" onclick="expUI.addScheduleRow('${esc}')"><i class="fa fa-plus me-1"></i>Add Row</button>
@@ -3006,17 +3112,24 @@ const expUI = (() => {
       const utcCell = baseMs != null
         ? `<td class="text-muted small" id="sched-utc-${safeId}-${i}">${new Date(baseMs + s.time * 1000).toISOString().slice(11, 19)}</td>`
         : `<td class="text-muted small" id="sched-utc-${safeId}-${i}">—</td>`;
+      const valueCell = isRelay
+        ? `<td><select class="sched-state-input" onchange="expUI._onScheduleChange('${esc}',${i},'state',this.value)">
+             <option value="1" ${s.state ? 'selected' : ''}>ON</option>
+             <option value="0" ${!s.state ? 'selected' : ''}>OFF</option>
+           </select></td>`
+        : `<td><input type="number" class="sched-sp-input" value="${Number(s.setpoint).toFixed(3)}" step="0.001" min="0"
+             onchange="expUI._onScheduleChange('${esc}',${i},'setpoint',this.value)"></td>`;
       return `<tr>
         <td><input type="text" class="sched-time-input" value="${_fmtDurationExp(s.time)}"
              onchange="expUI._onScheduleChange('${esc}',${i},'time',this.value)" title="HH:MM:SS or seconds"></td>
         ${utcCell}
-        <td><input type="number" class="sched-sp-input" value="${Number(s.setpoint).toFixed(3)}" step="0.001" min="0"
-             onchange="expUI._onScheduleChange('${esc}',${i},'setpoint',this.value)"></td>
+        ${valueCell}
         <td><button class="btn btn-xs btn-outline-danger" onclick="expUI._deleteScheduleRow('${esc}',${i})" title="Delete row"><i class="fa fa-trash"></i></button></td>
       </tr>`;
     }).join('');
+    const valueHeader = isRelay ? 'State (ON/OFF)' : 'Setpoint (SLPM)';
     return `<table class="sched-edit-table w-100">
-      <thead><tr><th>Elapsed</th><th>UTC Time</th><th>Setpoint (SLPM)</th><th></th></tr></thead>
+      <thead><tr><th>Elapsed</th><th>UTC Time</th><th>${valueHeader}</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <button class="btn btn-xs btn-outline-info mt-1" onclick="expUI.addScheduleRow('${esc}')"><i class="fa fa-plus me-1"></i>Add Row</button>`;
@@ -3044,6 +3157,8 @@ const expUI = (() => {
       const parsed = parseFloat(value);
       if (isNaN(parsed) || parsed < 0) return;
       schedule[idx].setpoint = parsed;
+    } else if (field === 'state') {
+      schedule[idx].state = (value === '1' || value === true);
     }
     // Refresh UTC column only (avoid full re-render which loses focus)
     const baseMs = _editorGlobalStartIso ? new Date(_editorGlobalStartIso).getTime() : null;
@@ -3066,7 +3181,11 @@ const expUI = (() => {
     if (!_editorSchedules[deviceName]) _editorSchedules[deviceName] = [];
     const schedule = _editorSchedules[deviceName];
     const lastTime = schedule.length > 0 ? schedule[schedule.length - 1].time : 0;
-    schedule.push({ time: lastTime + 3600, setpoint: 0 });
+    if (_editorTargetMeta[deviceName]) {
+      schedule.push({ time: lastTime + 3600, state: false });
+    } else {
+      schedule.push({ time: lastTime + 3600, setpoint: 0 });
+    }
     _refreshDeviceTable(deviceName);
   }
 
@@ -3290,6 +3409,25 @@ const expUI = (() => {
     }
   }
 
+  /** Multi-device CSV import doesn't track _editorTargetMeta (rows may not
+   * exist in the editor yet), so infer flow vs relay from the schedule's own
+   * shape (a 'state' field means relay) and, for relay, recover
+   * peripheral_name/channel from the "PeripheralName::channel" key — the same
+   * composite key convention used everywhere else. */
+  function _inferScheduleEntryPayload(name, sched) {
+    const looksRelay = sched.length > 0 && sched[0].state !== undefined;
+    if (looksRelay) {
+      const idx = name.lastIndexOf('::');
+      if (idx >= 0) {
+        const channel = parseInt(name.slice(idx + 2), 10);
+        if (!isNaN(channel)) {
+          return { target_type: 'relay', peripheral_name: name.slice(0, idx), channel, schedule: sched };
+        }
+      }
+    }
+    return { device_name: name, schedule: sched };
+  }
+
   async function _finishCsvApply(schedules, newGlobalStartIso) {
     if (_csvShiftModal) _csvShiftModal.hide();
     const errEl = document.getElementById('expEditorError');
@@ -3305,7 +3443,7 @@ const expUI = (() => {
       try {
         const deviceSchedules = {};
         for (const [name, sched] of Object.entries(schedules)) {
-          deviceSchedules[name] = { device_name: name, schedule: sched };
+          deviceSchedules[name] = _inferScheduleEntryPayload(name, sched);
         }
         const body = { device_schedules: deviceSchedules };
         if (globalStartIso) body.global_start_iso = globalStartIso;
@@ -3338,6 +3476,12 @@ const expUI = (() => {
   function _applyCsvSchedules(schedules) {
     let added = 0;
     for (const [deviceName, schedule] of Object.entries(schedules)) {
+      const inferred = _inferScheduleEntryPayload(deviceName, schedule);
+      if (inferred.target_type === 'relay') {
+        _editorTargetMeta[deviceName] = {
+          target_type: 'relay', peripheral_name: inferred.peripheral_name, channel: inferred.channel,
+        };
+      }
       if (_editorSchedules[deviceName] === undefined) {
         _addDeviceScheduleRowElement(deviceName, schedule);
       } else {
@@ -3368,12 +3512,27 @@ const expUI = (() => {
     const file = input.files[0];
     if (!file) return;
     const expId = document.getElementById('expEditorId').value;
+    const relayMeta = _editorTargetMeta[deviceName];
+
+    if (relayMeta && !expId) {
+      // /api/upload_schedule (the new-experiment, not-yet-saved parse path) is
+      // flow-only. Save the experiment first so the server-side relay-aware
+      // parser (which needs peripheral_name/channel) can be used instead.
+      _showAppToast('Save the experiment before importing a CSV for a relay/heater row.', 'warning');
+      input.value = '';
+      return;
+    }
 
     // If editing an existing experiment, use the server-side parse endpoint
     // Otherwise parse client-side (for new experiments)
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('device_name', deviceName);
+    if (relayMeta) {
+      formData.append('peripheral_name', relayMeta.peripheral_name);
+      formData.append('channel', String(relayMeta.channel));
+    } else {
+      formData.append('device_name', deviceName);
+    }
 
     try {
       let schedule;
@@ -3416,8 +3575,20 @@ const expUI = (() => {
     input.value = '';
   }
 
+  /** Build the device_schedules[key] entry to PUT to the server, in either
+   * flow shape ({device_name, schedule}) or relay shape ({target_type:'relay',
+   * peripheral_name, channel, schedule}) depending on _editorTargetMeta. */
+  function _buildScheduleEntryPayload(key, schedule) {
+    const meta = _editorTargetMeta[key];
+    if (meta && meta.target_type === 'relay') {
+      return { target_type: 'relay', peripheral_name: meta.peripheral_name, channel: meta.channel, schedule };
+    }
+    return { device_name: key, schedule };
+  }
+
   function removeDeviceRow(deviceName) {
     delete _editorSchedules[deviceName];
+    delete _editorTargetMeta[deviceName];
     const row = document.getElementById(`expDevRow-${_safeId(deviceName)}`);
     if (row) row.remove();
     const expId = document.getElementById('expEditorId').value;
@@ -3427,7 +3598,7 @@ const expUI = (() => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ device_schedules: Object.fromEntries(
-          Object.entries(_editorSchedules).map(([n, s]) => [n, {device_name:n, schedule:s}])
+          Object.entries(_editorSchedules).map(([n, s]) => [n, _buildScheduleEntryPayload(n, s)])
         )}),
       });
     }
@@ -3457,7 +3628,7 @@ const expUI = (() => {
         // Update existing
         const deviceSchedules = {};
         for (const [n, s] of Object.entries(_editorSchedules)) {
-          deviceSchedules[n] = { device_name: n, schedule: s };
+          deviceSchedules[n] = _buildScheduleEntryPayload(n, s);
         }
         const putBody = { ...metadata, device_schedules: deviceSchedules };
         if (_editorGlobalStartIso) putBody.global_start_iso = _editorGlobalStartIso;
@@ -3479,7 +3650,7 @@ const expUI = (() => {
         const allSchedules = {};
         for (const [deviceName, schedule] of Object.entries(_editorSchedules)) {
           if (schedule.length > 0) {
-            allSchedules[deviceName] = { device_name: deviceName, schedule };
+            allSchedules[deviceName] = _buildScheduleEntryPayload(deviceName, schedule);
           }
         }
         if (Object.keys(allSchedules).length > 0) {
@@ -3552,6 +3723,7 @@ const expUI = (() => {
         const statusText = d.connected ? 'Connected' : d.found ? 'Not connected' : 'Not found in system';
         return `<div class="check-item">
           <i class="fa ${icon}"></i>
+          <i class="fa ${d.target_type === 'relay' ? 'fa-bolt' : 'fa-droplet'} text-muted" style="font-size:0.7rem" title="${d.target_type === 'relay' ? 'Relay/heater schedule' : 'Flow schedule'}"></i>
           <span class="fw-semibold">${_escHtml(d.device_name)}</span>
           <span class="text-muted">${statusText}</span>
           <span class="text-muted ms-auto">${d.steps} steps</span>

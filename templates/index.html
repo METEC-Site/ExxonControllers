@@ -1267,7 +1267,7 @@ function switchMainTab(tab) {
         <!-- Device Schedules -->
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h6 class="mb-0 text-muted text-uppercase" style="font-size:0.78rem;letter-spacing:.05em">
-            <i class="fa fa-wind me-1 text-info"></i>Device Schedules
+            <i class="fa fa-wind me-1 text-info"></i>Device &amp; Relay/Heater Schedules
           </h6>
           <div class="d-flex gap-2">
             <button class="btn btn-sm btn-outline-secondary" onclick="expUI.showCsvTemplate()"
@@ -1287,10 +1287,10 @@ function switchMainTab(tab) {
                onchange="expUI.handleMultiDeviceCSVFile(this)">
         <!-- Inline device picker (shown when Add Device is clicked) -->
         <div id="addDevicePicker" class="d-none mb-2 p-2" style="background:#0d1117;border:1px solid #30363d;border-radius:6px">
-          <label class="form-label small mb-1">Select or type a device name:</label>
+          <label class="form-label small mb-1">Select a flow device or relay/heater channel:</label>
           <div class="d-flex gap-2">
             <input type="text" class="form-control form-control-sm ec-input" id="addDeviceInput"
-                   list="deviceNameDatalist" placeholder="Choose from list or type name..."
+                   list="deviceNameDatalist" placeholder="Choose from list, or type a flow device name..."
                    onkeydown="if(event.key==='Enter'){expUI.confirmAddDevice();}if(event.key==='Escape'){expUI.cancelAddDevice();}">
             <datalist id="deviceNameDatalist"></datalist>
             <button class="btn btn-sm btn-outline-info" onclick="expUI.confirmAddDevice()">Add</button>
