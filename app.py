@@ -2124,7 +2124,7 @@ if __name__ == '__main__':
     if nas_cfg.get('enabled') and nas_cfg.get('path'):
         nas_relay.restore(nas_cfg['path'])
         if nas_relay.is_enabled:
-            print(f"  NAS File Echo: restored → {nas_cfg['path']}")
+            print(f"  NAS File Echo: restored -> {nas_cfg['path']}")
         else:
             print(f"  NAS File Echo: path invalid for this OS (kept disabled) → {nas_cfg['path']}")
 
